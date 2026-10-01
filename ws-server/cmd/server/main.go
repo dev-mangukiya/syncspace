@@ -30,6 +30,8 @@ func main() {
 	jwtSecret := getEnv("JWT_SECRET", "dev-jwt-secret-change-in-production")
 	corsOrigin := getEnv("CORS_ORIGIN", "http://localhost:3000")
 	env := getEnv("ENV", "development")
+	execURL := getEnv("EXEC_SERVICE_URL", "http://host.docker.internal:8081")
+	execSecret := getEnv("EXEC_SERVICE_SECRET", "")
 
 	// ── Env validation ───────────────────────────────────────────
 	// Refuse to start in production with default/weak JWT secret
@@ -37,8 +39,17 @@ func main() {
 		if jwtSecret == "dev-jwt-secret-change-in-production" || len(jwtSecret) < 32 {
 			log.Fatal("FATAL: JWT_SECRET must be set to a strong secret (>= 32 chars) in production")
 		}
-	} else if jwtSecret == "dev-jwt-secret-change-in-production" {
-		log.Println("WARNING: Using default JWT secret — change this before deploying")
+		if execSecret == "" || execSecret == "syncspace_exec_secret_dev" || len(execSecret) < 16 {
+			log.Fatal("FATAL: EXEC_SERVICE_SECRET must be configured with a strong secret (>= 16 chars) in production")
+		}
+	} else {
+		if jwtSecret == "dev-jwt-secret-change-in-production" {
+			log.Println("WARNING: Using default JWT secret — change this before deploying")
+		}
+		if execSecret == "" {
+			execSecret = "syncspace_exec_secret_dev"
+			log.Println("WARNING: EXEC_SERVICE_SECRET unset in development, using default dev secret")
+		}
 	}
 
 	// PostgreSQL configuration
@@ -96,6 +107,7 @@ func main() {
 	membersHandler := handlers.NewMembersHandler(db)
 	chatHandler := handlers.NewChatHandler(db, hub)
 	aiHandler := handlers.NewAIHandler()
+	runHandler := handlers.NewRunHandler(db, hub, execURL, execSecret)
 
 	// Build router
 	r := chi.NewRouter()
@@ -116,7 +128,7 @@ func main() {
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   allowedOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
 		ExposedHeaders:   []string{"Link"},
 		AllowCredentials: true,
 		MaxAge:           300,
@@ -125,6 +137,7 @@ func main() {
 	// Public routes
 	r.Get("/health", healthHandler.Health)
 	r.Get("/api/ai/info", aiHandler.Info)
+	r.Get("/api/exec/limits", runHandler.GetLimits)
 
 	// Auth routes (public, rate-limited, no CSRF — these SET cookies)
 	r.Route("/api/auth", func(r chi.Router) {
@@ -171,6 +184,11 @@ func main() {
 			// Workspace chat (persisted in Postgres, last 200 messages, real-time via Redis pub/sub)
 			r.Get("/{slug}/messages", chatHandler.List)
 			r.With(chatLimiter.UserMiddleware).Post("/{slug}/messages", chatHandler.Create)
+
+			// Secure Docker execution (Phase D) — owner/editor only, rate-limited, Redis-locked, streamed over WS
+			r.Post("/{slug}/run", runHandler.Run)
+			r.Post("/{slug}/run/cancel", runHandler.Cancel)
+			r.Get("/{slug}/runs", runHandler.ListRuns)
 		})
 
 		// AI assistant (rate-limited per IP)

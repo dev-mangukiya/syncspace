@@ -19,6 +19,10 @@ const nextConfig: NextConfig = {
         destination: `${wsServerUrl}/api/ai/:path*`,
       },
       {
+        source: "/api/exec/:path*",
+        destination: `${wsServerUrl}/api/exec/:path*`,
+      },
+      {
         source: "/api/ws-ticket",
         destination: `${wsServerUrl}/api/ws-ticket`,
       },

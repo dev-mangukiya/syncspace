@@ -206,6 +206,10 @@ export class SyncProvider {
                 window.dispatchEvent(new CustomEvent('syncspace:chat', { detail: parsed.message }));
               }
               this.onChatMessage?.(parsed.message);
+            } else if (parsed.type && parsed.type.startsWith('run_')) {
+              if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('syncspace:run', { detail: parsed }));
+              }
             } else {
               this.onFileTreeEvent?.(parsed);
             }

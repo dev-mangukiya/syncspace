@@ -112,3 +112,21 @@ type WorkspaceMessage struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// WorkspaceRun represents an execution run recorded in history
+type WorkspaceRun struct {
+	ID          uuid.UUID  `json:"id"`
+	RunID       string     `json:"run_id"`
+	WorkspaceID uuid.UUID  `json:"workspace_id"`
+	UserID      *uuid.UUID `json:"user_id,omitempty"`
+	Username    string     `json:"username"`
+	FilePath    string     `json:"file_path"`
+	Language    string     `json:"language"`
+	ExitCode    int        `json:"exit_code"`
+	DurationMs  int64      `json:"duration_ms"`
+	TimedOut    bool       `json:"timed_out"`
+	Cancelled   bool       `json:"cancelled"`
+	Truncated   bool       `json:"truncated"`
+	Output      string     `json:"output"`
+	CreatedAt   time.Time  `json:"created_at"`
+}
+

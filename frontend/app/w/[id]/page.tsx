@@ -23,11 +23,11 @@ import { TabBar } from '@/app/components/workspace/tab-bar';
 import { CommandPalette, PaletteAction } from '@/app/components/workspace/command-palette';
 import { ShareModal } from '@/app/components/workspace/share-modal';
 import { WorkspaceChat } from '@/app/components/workspace/workspace-chat';
+import { OutputPanel } from '@/app/components/workspace/output-panel';
 import axios from 'axios';
 
 const Editor = dynamic(() => import('@monaco-editor/react'), { ssr: false });
 
-const EXEC_URL = process.env.NEXT_PUBLIC_EXEC_SERVICE_URL || 'http://localhost:8081';
 const WS_URL = process.env.NEXT_PUBLIC_WS_SERVER_URL || 'http://localhost:8080';
 
 // ── Helpers ──────────────────────────────────────────────
@@ -139,9 +139,19 @@ export default function WorkspacePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  // Execution state
-  const [executing, setExecuting] = useState(false);
-  const [execResult, setExecResult] = useState<ExecResult | null>(null);
+  // Execution state (Phase D)
+  const [isRunning, setIsRunning] = useState(false);
+  const [runningUser, setRunningUser] = useState<string | null>(null);
+  const [activeRunOutput, setActiveRunOutput] = useState('');
+  const [lastRunResult, setLastRunResult] = useState<{
+    exitCode: number;
+    durationMs: number;
+    peakMemoryBytes?: number;
+    truncated?: boolean;
+    timedOut?: boolean;
+    cancelled?: boolean;
+  } | null>(null);
+  const executing = isRunning;
   const [showOutput, setShowOutput] = useState(false);
   const [outputHeight, setOutputHeight] = useState(220);
 
@@ -441,10 +451,51 @@ export default function WorkspacePage() {
     }
   }, [slug, tabManager]);
 
-  // ── Code execution ─────────────────────────────────────
+  // ── Code execution (Phase D) ───────────────────────────
+
+  useEffect(() => {
+    const handleRunEvent = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      const detail = customEvent.detail;
+      if (!detail) return;
+
+      if (detail.type === 'run_started') {
+        setIsRunning(true);
+        setRunningUser(detail.user || 'Someone');
+        setActiveRunOutput('');
+        setShowOutput(true);
+      } else if (detail.type === 'run_output') {
+        if (detail.chunk) {
+          setActiveRunOutput(prev => prev + detail.chunk);
+        }
+      } else if (detail.type === 'run_finished') {
+        setIsRunning(false);
+        setRunningUser(null);
+        setLastRunResult({
+          exitCode: detail.exitCode,
+          durationMs: detail.durationMs,
+          peakMemoryBytes: detail.peakMemoryBytes,
+          truncated: detail.truncated,
+          timedOut: detail.timedOut,
+          cancelled: detail.cancelled,
+        });
+      }
+    };
+
+    window.addEventListener('syncspace:run', handleRunEvent);
+    return () => {
+      window.removeEventListener('syncspace:run', handleRunEvent);
+    };
+  }, []);
 
   const runCode = useCallback(async () => {
-    if (!activeFile || executing) return;
+    if (!activeFile || isRunning) return;
+    if (workspace?.role === 'viewer') {
+      setError('Viewers are not permitted to run code');
+      setTimeout(() => setError(''), 3000);
+      return;
+    }
+
     // Save current Y.Doc content before executing
     const provider = activeFile ? tabManager.getProvider(activeFile.path) : null;
     const currentContent = provider
@@ -453,29 +504,69 @@ export default function WorkspacePage() {
     if (provider) {
       await persistContent(activeFile.path, currentContent);
     }
-    setExecuting(true);
+
+    setIsRunning(true);
+    setRunningUser(user?.username || 'You');
+    setActiveRunOutput('');
     setShowOutput(true);
-    setExecResult(null);
 
     try {
       const lang = getLanguage(activeFile.path);
-      const res = await axios.post<ExecResult>(`${EXEC_URL}/api/exec/run`, {
+      const csrfCookie = document.cookie.match(/(^| )syncspace_csrf=([^;]+)/);
+      const csrfToken = csrfCookie ? decodeURIComponent(csrfCookie[2]) : '';
+
+      const res = await axios.post(`/api/workspaces/${slug}/run`, {
+        file_path: activeFile.path,
         code: currentContent,
         language: lang,
+      }, {
+        withCredentials: true,
+        headers: { 'X-CSRF-Token': csrfToken },
+        timeout: 40000,
       });
-      setExecResult(res.data);
+
+      if (res.data) {
+        setLastRunResult({
+          exitCode: res.data.exit_code,
+          durationMs: res.data.duration_ms,
+          peakMemoryBytes: res.data.peak_memory_bytes,
+          truncated: res.data.truncated,
+          timedOut: res.data.timed_out,
+          cancelled: res.data.cancelled,
+        });
+        if (res.data.output) {
+          setActiveRunOutput(res.data.output);
+        }
+      }
     } catch (err: unknown) {
-      const errorMessage = axios.isAxiosError(err)
-        ? err.response?.data?.error || err.message
-        : 'Execution failed';
-      setExecResult({
-        id: 'error', stdout: '', stderr: `Error: ${errorMessage}`,
-        exit_code: -1, duration_ms: 0, timed_out: false, language: getLanguage(activeFile.path),
-      });
+      if (axios.isAxiosError(err)) {
+        const errorMsg = err.response?.data?.error || err.message;
+        setError(errorMsg);
+        setTimeout(() => setError(''), 4000);
+        setActiveRunOutput(prev => prev ? prev + `\n[Error: ${errorMsg}]\n` : `[Error: ${errorMsg}]\n`);
+        setLastRunResult({
+          exitCode: -1,
+          durationMs: 0,
+        });
+      }
     } finally {
-      setExecuting(false);
+      setIsRunning(false);
+      setRunningUser(null);
     }
-  }, [activeFile, editorContent, executing, persistContent]);
+  }, [activeFile, editorContent, isRunning, persistContent, slug, tabManager, user, workspace?.role]);
+
+  const cancelRun = useCallback(async () => {
+    try {
+      const csrfCookie = document.cookie.match(/(^| )syncspace_csrf=([^;]+)/);
+      const csrfToken = csrfCookie ? decodeURIComponent(csrfCookie[2]) : '';
+      await axios.post(`/api/workspaces/${slug}/run/cancel`, {}, {
+        withCredentials: true,
+        headers: { 'X-CSRF-Token': csrfToken },
+      });
+    } catch (err) {
+      console.error('Failed to cancel run:', err);
+    }
+  }, [slug]);
 
   // ── AI Chat ────────────────────────────────────────────
 
@@ -835,7 +926,7 @@ export default function WorkspacePage() {
     );
   }
 
-  const canRun = activeFile && ['python', 'javascript', 'go', 'ruby'].includes(getLanguage(activeFile.path));
+  const canRun = activeFile && ['python', 'javascript', 'typescript', 'go', 'ruby'].includes(getLanguage(activeFile.path)) && workspace?.role !== 'viewer';
 
   // ── Render ─────────────────────────────────────────────
 
@@ -878,9 +969,14 @@ export default function WorkspacePage() {
           </span>
 
           {/* Run */}
-          <button onClick={runCode} disabled={!canRun || executing} className="btn btn-run btn-sm">
-            {executing ? <Loader2 size={14} className="spin-icon" /> : <Play size={14} />}
-            {executing ? 'Running' : 'Run'}
+          <button
+            onClick={runCode}
+            disabled={!canRun || isRunning}
+            className="btn btn-run btn-sm"
+            title={workspace?.role === 'viewer' ? 'Viewers cannot run code' : undefined}
+          >
+            {isRunning ? <Loader2 size={14} className="spin-icon" /> : <Play size={14} />}
+            {isRunning ? (runningUser ? `${runningUser} running...` : 'Running') : 'Run'}
             <span className="kbd" style={{ background: 'rgba(255,255,255,0.15)', color: 'rgba(255,255,255,0.7)', borderColor: 'rgba(255,255,255,0.2)' }}>
               Enter
             </span>
@@ -1214,97 +1310,18 @@ export default function WorkspacePage() {
 
           {/* ─── Output Panel ─── */}
           {showOutput && (
-            <>
-              {/* Resize handle */}
-              <div
-                onMouseDown={onResizeStart}
-                style={{
-                  height: '3px', cursor: 'row-resize', flexShrink: 0,
-                  background: 'var(--color-border-subtle)',
-                  transition: 'background var(--duration-fast)',
-                }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-accent)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'var(--color-border-subtle)')}
-              />
-              <div style={{
-                height: `${outputHeight}px`, flexShrink: 0,
-                background: 'var(--color-bg-app)', display: 'flex', flexDirection: 'column',
-              }}>
-                {/* Output header */}
-                <div style={{
-                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                  padding: 'var(--space-1) var(--space-3)',
-                  borderBottom: '1px solid var(--color-border-subtle)', flexShrink: 0,
-                }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
-                    <span style={{
-                      fontSize: 'var(--text-xs)', fontWeight: 500,
-                      color: execResult
-                        ? execResult.exit_code === 0 ? 'var(--color-success)' : 'var(--color-danger)'
-                        : 'var(--color-text-faint)',
-                    }}>
-                      Output
-                    </span>
-                    {execResult && (
-                      <>
-                        <span className={`badge badge-status ${execResult.exit_code === 0 ? 'badge-success' : 'badge-danger'}`}>
-                          {execResult.exit_code === 0 ? 'Exit 0' : `Exit ${execResult.exit_code}`}
-                        </span>
-                        <span style={{ fontSize: '11px', color: 'var(--color-text-faint)' }}>
-                          {execResult.duration_ms}ms
-                        </span>
-                        {execResult.timed_out && (
-                          <span className="badge badge-status badge-warning">TIMED OUT</span>
-                        )}
-                        {execResult.output_capped && (
-                          <span className="badge badge-status badge-warning">TRUNCATED</span>
-                        )}
-                      </>
-                    )}
-                    {executing && (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
-                        <div className="spinner" style={{ width: '12px', height: '12px' }} />
-                        <span style={{ fontSize: '11px', color: 'var(--color-warning)' }}>Executing...</span>
-                      </div>
-                    )}
-                  </div>
-                  <button onClick={() => setShowOutput(false)} className="btn-icon" style={{ width: '24px', height: '24px' }}>
-                    <X size={14} />
-                  </button>
-                </div>
-
-                {/* Output content */}
-                <div style={{
-                  flex: 1, overflow: 'auto', padding: 'var(--space-3)',
-                  fontFamily: 'var(--font-mono)', fontSize: 'var(--text-sm)', lineHeight: 1.6,
-                }}>
-                  {execResult ? (
-                    <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                      {execResult.stdout && (
-                        <span style={{ color: 'var(--color-text)' }}>{execResult.stdout}</span>
-                      )}
-                      {execResult.stderr && (
-                        <span style={{ color: 'var(--color-danger)' }}>
-                          {execResult.stdout ? '\n' : ''}{execResult.stderr}
-                        </span>
-                      )}
-                      {!execResult.stdout && !execResult.stderr && (
-                        <span style={{ color: 'var(--color-text-faint)', fontStyle: 'italic' }}>
-                          (no output)
-                        </span>
-                      )}
-                    </pre>
-                  ) : !executing ? (
-                    <div style={{ color: 'var(--color-text-faint)', fontSize: 'var(--text-xs)' }}>
-                      <p>Press <span className="kbd">Enter</span> or click <strong>Run</strong> to execute code in a sandboxed container.</p>
-                      <p style={{ marginTop: 'var(--space-2)', opacity: 0.6 }}>
-                        Sandbox: network disabled, read-only fs, 128MB memory, 10s timeout
-                      </p>
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-            </>
+            <OutputPanel
+              slug={slug}
+              userRole={workspace?.role}
+              outputHeight={outputHeight}
+              onResizeStart={onResizeStart}
+              onClose={() => setShowOutput(false)}
+              isRunning={isRunning}
+              runningUser={runningUser}
+              onCancelRun={cancelRun}
+              activeRunOutput={activeRunOutput}
+              lastRunResult={lastRunResult}
+            />
           )}
         </div>
 
