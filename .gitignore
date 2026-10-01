@@ -1,0 +1,66 @@
+# Environment files (ignore all .env variations except .env.example)
+.env*
+!.env.example
+
+# Dependencies
+node_modules/
+*/node_modules/
+vendor/
+
+# Build artifacts
+.next/
+*/.next/
+out/
+dist/
+bin/
+*/bin/
+
+# Test artifacts, reports, and generated test screenshots
+tests/*.png
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.mp4
+*.webm
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+
+# Keep production brand assets in public/
+!frontend/public/*.png
+!frontend/public/**/*.png
+!frontend/public/*.svg
+
+# Temporary and cache directories
+.cache/
+*.tmp
+*.temp
+.syncspace-exec-tmp/
+*.db
+*.db-shm
+*.db-wal
+data/
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Operating System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

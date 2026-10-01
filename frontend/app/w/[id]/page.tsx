@@ -1,0 +1,1664 @@
+'use client';
+
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { useRouter, useParams } from 'next/navigation';
+import Link from 'next/link';
+import dynamic from 'next/dynamic';
+import {
+  ArrowLeft, Play, Terminal, Bot, X, Check,
+  File, Send, Wrench,
+  Lightbulb, Zap, TestTube2, Loader2, Plus, Trash2, Eraser,
+  Users, Command, Columns2, Folder, Hash, Moon, Sun, MessageSquare,
+} from 'lucide-react';
+import { useAuthStore } from '@/app/lib/store';
+import { workspaceAPI, FileEntry, Workspace } from '@/app/lib/api';
+import { Logo } from '@/app/components/ui/logo';
+import { ThemeToggle } from '@/app/components/ui/theme-toggle';
+import { syncspaceDark, syncspaceLight } from '@/app/lib/monaco-themes';
+import { useTheme } from '@/app/lib/hooks/use-theme';
+import { SyncProvider } from '@/app/lib/sync-provider';
+import { createYMonacoBinding } from '@/app/lib/y-monaco-lazy';
+import { useTabManager } from '@/app/lib/use-tab-manager';
+import { TabBar } from '@/app/components/workspace/tab-bar';
+import { CommandPalette, PaletteAction } from '@/app/components/workspace/command-palette';
+import { ShareModal } from '@/app/components/workspace/share-modal';
+import { WorkspaceChat } from '@/app/components/workspace/workspace-chat';
+import axios from 'axios';
+
+const Editor = dynamic(() => import('@monaco-editor/react'), { ssr: false });
+
+const EXEC_URL = process.env.NEXT_PUBLIC_EXEC_SERVICE_URL || 'http://localhost:8081';
+const WS_URL = process.env.NEXT_PUBLIC_WS_SERVER_URL || 'http://localhost:8080';
+
+// ── Helpers ──────────────────────────────────────────────
+
+function getLanguageLabel(path: string): string {
+  const lang = getLanguage(path);
+  const labels: Record<string, string> = {
+    javascript: 'JavaScript',
+    typescript: 'TypeScript',
+    python: 'Python',
+    ruby: 'Ruby',
+    go: 'Go',
+    rust: 'Rust',
+    java: 'Java',
+    json: 'JSON',
+    markdown: 'Markdown',
+    html: 'HTML',
+    css: 'CSS',
+    yaml: 'YAML',
+    xml: 'XML',
+    sql: 'SQL',
+    shell: 'Shell',
+    plaintext: 'Plain Text',
+  };
+  return labels[lang] || lang.charAt(0).toUpperCase() + lang.slice(1);
+}
+
+function getLanguage(path: string): string {
+  const ext = path.split('.').pop()?.toLowerCase();
+  const map: Record<string, string> = {
+    js: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript',
+    py: 'python', rb: 'ruby', go: 'go', rs: 'rust', java: 'java',
+    json: 'json', md: 'markdown', html: 'html', css: 'css',
+    yml: 'yaml', yaml: 'yaml', xml: 'xml', sql: 'sql',
+    sh: 'shell', bash: 'shell', txt: 'plaintext',
+  };
+  return map[ext || ''] || 'plaintext';
+}
+
+function getFileIconColor(path: string): string {
+  const ext = path.split('.').pop()?.toLowerCase();
+  const colors: Record<string, string> = {
+    js: '#C9A06C', jsx: '#C9A06C', ts: '#7BAFCC', tsx: '#7BAFCC',
+    py: '#5B9E78', go: '#7BAFCC', rb: '#C25B56', json: '#C29A4B',
+    md: '#9AA3AE', html: '#C9835F', css: '#B79AC9', yml: '#9AA3AE',
+    yaml: '#9AA3AE', txt: '#7A848F',
+  };
+  return colors[ext || ''] || 'var(--color-text-faint)';
+}
+
+interface ExecResult {
+  id: string;
+  stdout: string;
+  stderr: string;
+  exit_code: number;
+  duration_ms: number;
+  timed_out: boolean;
+  output_capped?: boolean;
+  language: string;
+}
+
+interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  codeBlock?: string;
+  tokensUsed?: number;
+  model?: string;
+  timestamp: Date;
+}
+
+// ── Main Component ───────────────────────────────────────
+
+export default function WorkspacePage() {
+  const router = useRouter();
+  const params = useParams();
+  // Route is /w/[id] where id = opaque short_id (32-char hex)
+  const slug = params.id as string;
+  const { isLoading: authLoading, isAuthenticated, checkAuth, user } = useAuthStore();
+  const { resolvedTheme, toggleTheme } = useTheme();
+  const [cursorPos, setCursorPos] = useState({ line: 1, col: 1 });
+  const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [showShareModal, setShowShareModal] = useState(false);
+  const [showSidebar, setShowSidebar] = useState(true);
+
+  // ── Multi-tab state ─────────────────────────────────────
+  // Tab manager handles multiple open files, each with its own SyncProvider.
+  // Per-tab Y.Doc + WS connection persists across tab switches.
+  const [colorSlot, setColorSlot] = useState(0);
+  const tabManager = useTabManager({
+    slug,
+    userId: user?.id || '',
+    username: user?.username || '',
+    colorSlot,
+  });
+
+  // ── CRDT sync state for the ACTIVE tab only ─────────────
+  // These refs manage the Monaco ↔ Y.Doc binding for whichever tab is visible.
+  const editorRef = useRef<unknown>(null);
+  const monacoRef = useRef<unknown>(null);
+  const yMonacoBindingRef = useRef<unknown>(null);
+  const [syncStatus, setSyncStatus] = useState<'disconnected' | 'connecting' | 'synced'>('disconnected');
+  const [peerCount, setPeerCount] = useState(0);
+
+  const [workspace, setWorkspace] = useState<Workspace | null>(null);
+  const [files, setFiles] = useState<FileEntry[]>([]);
+  // activeFile is derived from tab state for backward compatibility with AI/exec
+  const activeFile = tabManager.tabState.openTabs.find(t => t.path === tabManager.tabState.activeTabPath)?.file || null;
+  const [editorContent, setEditorContent] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  // Execution state
+  const [executing, setExecuting] = useState(false);
+  const [execResult, setExecResult] = useState<ExecResult | null>(null);
+  const [showOutput, setShowOutput] = useState(false);
+  const [outputHeight, setOutputHeight] = useState(220);
+
+  // AI Chat state
+  const [showAI, setShowAI] = useState(false);
+  const [aiInfo, setAiInfo] = useState<{ configured: boolean; available: boolean; model: string; status_msg?: string } | null>(null);
+  const [aiMessages, setAIMessages] = useState<ChatMessage[]>([
+    {
+      role: 'assistant',
+      content: 'SyncSpace AI ready. Select a file and ask me to **fix**, **explain**, or **optimize** your code.',
+      timestamp: new Date(),
+    }
+  ]);
+  const [aiInput, setAIInput] = useState('');
+  const [aiLoading, setAILoading] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Workspace Team Chat state
+  const [showChat, setShowChat] = useState(false);
+  const [unreadChatCount, setUnreadChatCount] = useState(0);
+
+  useEffect(() => {
+    const handleChatEvent = (e: CustomEvent) => {
+      const msg = e.detail;
+      if (!msg) return;
+      if (!showChat && msg.user_id !== user?.id) {
+        setUnreadChatCount((prev) => prev + 1);
+      }
+    };
+    window.addEventListener('syncspace:chat', handleChatEvent as EventListener);
+    return () => {
+      window.removeEventListener('syncspace:chat', handleChatEvent as EventListener);
+    };
+  }, [showChat, user?.id]);
+
+  // Resizable panel
+  const resizing = useRef(false);
+  const startY = useRef(0);
+  const startHeight = useRef(0);
+
+  // File management state
+  const [showNewFile, setShowNewFile] = useState(false);
+  const [newFilePath, setNewFilePath] = useState('');
+  const [creatingFile, setCreatingFile] = useState(false);
+
+  // ── Auth & Data Loading ────────────────────────────────
+
+  useEffect(() => { checkAuth(); }, [checkAuth]);
+  useEffect(() => {
+    if (!authLoading && !isAuthenticated) router.push('/auth/login');
+  }, [authLoading, isAuthenticated, router]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !slug) return;
+    const load = async () => {
+      try {
+        const [wsRes, filesRes] = await Promise.all([
+          workspaceAPI.get(slug),
+          workspaceAPI.listFiles(slug),
+        ]);
+        setWorkspace(wsRes.data);
+        setFiles(filesRes.data);
+        if (filesRes.data.length > 0) {
+          const firstFile = filesRes.data[0];
+          tabManager.openTab(firstFile);
+          setEditorContent(firstFile.content);
+        }
+        // Fetch members to determine this user's colorSlot (by join order)
+        try {
+          const membersRes = await axios.get(`/api/workspaces/${slug}/members`, { withCredentials: true });
+          if (Array.isArray(membersRes.data)) {
+            const me = membersRes.data.find((m: { user_id: string }) => m.user_id === user?.id);
+            if (me && typeof me.color_slot === 'number') {
+              setColorSlot(me.color_slot);
+            }
+          }
+        } catch { /* non-fatal — default to slot 0 */ }
+
+        // Fetch AI status & active model
+        try {
+          const aiRes = await axios.get('/api/ai/info', { withCredentials: true });
+          setAiInfo(aiRes.data);
+          if (!aiRes.data.configured) {
+            setAIMessages([{
+              role: 'assistant',
+              content: "AI isn't configured on this server.\n\nSet the `GROQ_API_KEY` environment variable to enable SyncSpace AI.",
+              timestamp: new Date(),
+            }]);
+          } else if (!aiRes.data.available) {
+            setAIMessages([{
+              role: 'assistant',
+              content: `AI is currently unavailable: ${aiRes.data.status_msg || 'Model not found'}.`,
+              timestamp: new Date(),
+            }]);
+          }
+        } catch { /* non-fatal */ }
+      } catch { setError('Failed to load workspace'); }
+      finally { setLoading(false); }
+    };
+    load();
+  }, [isAuthenticated, slug, user]);
+
+  // ── Tab-aware Monaco binding ────────────────────────────
+  // When active tab changes, rebind Monaco to that tab's SyncProvider.
+  // The provider itself persists — only the Monaco ↔ Y.Doc binding changes.
+
+  const bindYMonaco = useCallback((provider: SyncProvider) => {
+    if (!editorRef.current || !monacoRef.current) return;
+    // Destroy previous binding
+    if (yMonacoBindingRef.current) {
+      (yMonacoBindingRef.current as { destroy: () => void }).destroy();
+      yMonacoBindingRef.current = null;
+    }
+    const editor = editorRef.current as import('monaco-editor').editor.IStandaloneCodeEditor;
+    const model = editor.getModel();
+    if (!model) return;
+    const binding = createYMonacoBinding(
+      monacoRef.current,
+      provider.getText(),
+      model,
+      new Set([editor]),
+      provider.awareness,
+    );
+    yMonacoBindingRef.current = binding;
+  }, []);
+
+  // Rebind Monaco when active tab changes
+  useEffect(() => {
+    const activePath = tabManager.tabState.activeTabPath;
+    if (!activePath) {
+      setSyncStatus('disconnected');
+      setPeerCount(0);
+      return;
+    }
+
+    const provider = tabManager.getProvider(activePath);
+    if (!provider) return;
+
+    // Update sync status from this tab's provider
+    provider.onStatus = ({ connected }) => {
+      setSyncStatus(connected ? 'connecting' : 'disconnected');
+    };
+    provider.onSynced = () => {
+      setSyncStatus('synced');
+      const ytext = provider.getText();
+      const tab = tabManager.tabState.openTabs.find(t => t.path === activePath);
+      if (ytext.length === 0 && tab?.file.content && tab.file.content.length > 0) {
+        provider.seedContent(tab.file.content);
+      }
+      setEditorContent(ytext.toString());
+    };
+
+    // Track awareness for peer count
+    const awarenessHandler = () => {
+      const states = provider.awareness.getStates();
+      setPeerCount(Math.max(0, states.size - 1));
+    };
+    provider.awareness.on('change', awarenessHandler);
+
+    // Track content for AI/exec
+    const updateHandler = () => {
+      setEditorContent(provider.getText().toString());
+    };
+    provider.doc.on('update', updateHandler);
+
+    // File tree events (handled by tab manager for tab lifecycle)
+    provider.onFileTreeEvent = (event) => {
+      tabManager.handleFileTreeEvent(event);
+      switch (event.type) {
+        case 'file_created':
+          workspaceAPI.listFiles(slug).then(res => setFiles(res.data)).catch(() => {});
+          break;
+        case 'file_deleted':
+          setFiles(prev => prev.filter(f => f.path !== event.path));
+          break;
+        case 'file_renamed':
+          workspaceAPI.listFiles(slug).then(res => setFiles(res.data)).catch(() => {});
+          break;
+      }
+    };
+
+    // Bind to Monaco if editor already mounted
+    if (editorRef.current && monacoRef.current) {
+      bindYMonaco(provider);
+    }
+
+    // Set initial sync status
+    if (provider.isSynced()) {
+      setSyncStatus('synced');
+      setEditorContent(provider.getText().toString());
+    } else {
+      setSyncStatus('connecting');
+    }
+
+    return () => {
+      provider.awareness.off('change', awarenessHandler);
+      provider.doc.off('update', updateHandler);
+      if (yMonacoBindingRef.current) {
+        (yMonacoBindingRef.current as { destroy: () => void }).destroy();
+        yMonacoBindingRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabManager.tabState.activeTabPath, slug, bindYMonaco]);
+
+  // Persist content helper (for keyboard shortcut / exec)
+  const persistContent = useCallback(async (filePath: string, content: string) => {
+    try {
+      await workspaceAPI.updateFile(slug, filePath, content);
+    } catch (err) {
+      console.error('[Persist] Failed to save:', err);
+    }
+  }, [slug]);
+
+  // Cleanup on unmount — destroy all tab providers
+  useEffect(() => {
+    return () => {
+      tabManager.destroyAll();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Flush Y.Doc content on hard tab close via navigator.sendBeacon.
+  useEffect(() => {
+    const handleUnload = () => {
+      if (!activeFile) return;
+      const provider = tabManager.getProvider(activeFile.path);
+      let content = '';
+      if (provider) {
+        content = provider.getText().toString();
+      }
+      if (!content && editorRef.current) {
+        const editor = editorRef.current as { getModel?: () => { getValue?: () => string } | null };
+        content = editor.getModel?.()?.getValue?.() || '';
+      }
+      if (!content) return;
+
+      const url = `/api/workspaces/${slug}/beacon-persist`;
+      const body = JSON.stringify({ path: activeFile.path, content });
+      const csrfCookie = document.cookie.match(/(^| )syncspace_csrf=([^;]+)/);
+      const csrfToken = csrfCookie ? decodeURIComponent(csrfCookie[2]) : '';
+      try {
+        fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+          credentials: 'include', body, keepalive: true,
+        });
+      } catch { /* best-effort */ }
+    };
+
+    window.addEventListener('beforeunload', handleUnload);
+    window.addEventListener('pagehide', handleUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleUnload);
+      window.removeEventListener('pagehide', handleUnload);
+    };
+  }, [activeFile, slug, tabManager]);
+
+  // ── File selection from sidebar ────────────────────────
+  const selectFile = (file: FileEntry) => {
+    tabManager.openTab(file);
+    setEditorContent(file.content);
+  };
+
+  // ── File create / delete ───────────────────────────────
+
+  const createNewFile = useCallback(async () => {
+    const path = newFilePath.trim();
+    if (!path || creatingFile) return;
+    setCreatingFile(true);
+    try {
+      const res = await workspaceAPI.createFile(slug, path);
+      setFiles(prev => [...prev, res.data].sort((a, b) => a.path.localeCompare(b.path)));
+      tabManager.openTab(res.data);
+      setEditorContent(res.data.content);
+      setShowNewFile(false);
+      setNewFilePath('');
+    } catch (err: unknown) {
+      const msg = axios.isAxiosError(err) ? err.response?.data?.error || err.message : 'Failed to create file';
+      setError(msg);
+      setTimeout(() => setError(''), 3000);
+    } finally {
+      setCreatingFile(false);
+    }
+  }, [newFilePath, creatingFile, slug, tabManager]);
+
+  const deleteExistingFile = useCallback(async (file: FileEntry) => {
+    if (!confirm(`Delete ${file.path}?`)) return;
+    try {
+      await workspaceAPI.deleteFile(slug, file.path);
+      setFiles(prev => prev.filter(f => f.id !== file.id));
+      // Close the tab if it was open
+      tabManager.closeTab(file.path);
+    } catch {
+      setError('Failed to delete file');
+      setTimeout(() => setError(''), 3000);
+    }
+  }, [slug, tabManager]);
+
+  // ── Code execution ─────────────────────────────────────
+
+  const runCode = useCallback(async () => {
+    if (!activeFile || executing) return;
+    // Save current Y.Doc content before executing
+    const provider = activeFile ? tabManager.getProvider(activeFile.path) : null;
+    const currentContent = provider
+      ? provider.getText().toString()
+      : editorContent;
+    if (provider) {
+      await persistContent(activeFile.path, currentContent);
+    }
+    setExecuting(true);
+    setShowOutput(true);
+    setExecResult(null);
+
+    try {
+      const lang = getLanguage(activeFile.path);
+      const res = await axios.post<ExecResult>(`${EXEC_URL}/api/exec/run`, {
+        code: currentContent,
+        language: lang,
+      });
+      setExecResult(res.data);
+    } catch (err: unknown) {
+      const errorMessage = axios.isAxiosError(err)
+        ? err.response?.data?.error || err.message
+        : 'Execution failed';
+      setExecResult({
+        id: 'error', stdout: '', stderr: `Error: ${errorMessage}`,
+        exit_code: -1, duration_ms: 0, timed_out: false, language: getLanguage(activeFile.path),
+      });
+    } finally {
+      setExecuting(false);
+    }
+  }, [activeFile, editorContent, executing, persistContent]);
+
+  // ── AI Chat ────────────────────────────────────────────
+
+  const sendAIMessage = useCallback(async (message: string) => {
+    if (!message.trim() || aiLoading) return;
+    const userMsg: ChatMessage = { role: 'user', content: message, timestamp: new Date() };
+    setAIMessages(prev => [...prev, userMsg]);
+    setAIInput('');
+    setAILoading(true);
+
+    try {
+      // Build conversation history (last 6 turns, exclude system messages)
+      const history = [...aiMessages, userMsg]
+        .filter(m => m.role === 'user' || m.role === 'assistant')
+        .slice(-6)
+        .map(m => ({ role: m.role, content: m.content }));
+
+      // Read CSRF token from cookie for the mutation
+      const csrfCookie = document.cookie.match(/(^| )syncspace_csrf=([^;]+)/);
+      const csrfToken = csrfCookie ? decodeURIComponent(csrfCookie[2]) : '';
+
+      const res = await axios.post(`/api/ai/chat`, {
+        message,
+        code: editorContent || '',
+        language: activeFile ? getLanguage(activeFile.path) : '',
+        file_path: activeFile?.path || '',
+        history,
+      }, {
+        withCredentials: true,
+        headers: { 'X-CSRF-Token': csrfToken },
+        timeout: 35000, // 35s client timeout (server has 30s)
+      });
+
+      const assistantMsg: ChatMessage = {
+        role: 'assistant',
+        content: res.data.reply,
+        codeBlock: res.data.code_block || undefined,
+        tokensUsed: res.data.tokens_used,
+        model: res.data.model,
+        timestamp: new Date(),
+      };
+      setAIMessages(prev => [...prev, assistantMsg]);
+    } catch (err: unknown) {
+      const errorMessage = axios.isAxiosError(err)
+        ? err.response?.data?.error || (err.code === 'ECONNABORTED' ? 'Request timed out' : err.message)
+        : 'AI request failed';
+      setAIMessages(prev => [...prev, {
+        role: 'assistant',
+        content: `Error: ${errorMessage}`,
+        timestamp: new Date(),
+      }]);
+    } finally {
+      setAILoading(false);
+    }
+  }, [activeFile, editorContent, aiLoading, aiMessages]);
+
+  const applyCode = useCallback((code: string) => {
+    // Apply AI-suggested code via Y.Doc (CRDT-safe)
+    const provider = activeFile ? tabManager.getProvider(activeFile.path) : null;
+    if (provider) {
+      const ytext = provider.getText();
+      provider.doc.transact(() => {
+        ytext.delete(0, ytext.length);
+        ytext.insert(0, code);
+      }, 'ai-apply');
+    } else {
+      setEditorContent(code);
+    }
+  }, []);
+
+  const clearChat = useCallback(() => {
+    setAIMessages([{
+      role: 'assistant',
+      content: 'Chat cleared. Select a file and ask me anything.',
+      timestamp: new Date(),
+    }]);
+  }, []);
+
+  // Auto-scroll chat
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [aiMessages, aiLoading]);
+
+  // ── Keyboard shortcuts ─────────────────────────────────
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+        e.preventDefault();
+        // Force-persist the current Y.Doc content
+        if (activeFile) {
+          const provider = tabManager.getProvider(activeFile.path);
+          if (provider) {
+            persistContent(activeFile.path, provider.getText().toString());
+          }
+        }
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); runCode(); }
+      // ⌘K: Command palette toggle
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        e.stopPropagation();
+        setShowCommandPalette(prev => !prev);
+      }
+      // ⌘I: AI panel toggle (⌘K reserved for command palette)
+      if ((e.metaKey || e.ctrlKey) && e.key === 'i') { e.preventDefault(); setShowAI(prev => !prev); }
+      // Alt+W: close active tab (⌘W is browser-owned and can't be reliably intercepted)
+      if (e.altKey && e.key === 'w') {
+        e.preventDefault();
+        if (tabManager.tabState.activeTabPath) {
+          tabManager.closeTab(tabManager.tabState.activeTabPath);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, [activeFile, persistContent, runCode, tabManager]);
+
+  // ── Command Palette: Go to Line listener ────────────────
+  useEffect(() => {
+    const handleGoToLine = (e: Event) => {
+      const line = (e as CustomEvent<number>).detail;
+      if (typeof line === 'number' && !isNaN(line) && editorRef.current) {
+        const editor = editorRef.current as import('monaco-editor').editor.IStandaloneCodeEditor;
+        if (editor?.revealLineInCenter && editor?.setPosition) {
+          editor.revealLineInCenter(line);
+          editor.setPosition({ lineNumber: line, column: 1 });
+          editor.focus();
+          setCursorPos({ line, col: 1 });
+        }
+      }
+    };
+    window.addEventListener('palette:goto-line', handleGoToLine);
+    return () => window.removeEventListener('palette:goto-line', handleGoToLine);
+  }, []);
+
+  // ── Output panel resize ────────────────────────────────
+
+  const onResizeStart = (e: React.MouseEvent) => {
+    resizing.current = true;
+    startY.current = e.clientY;
+    startHeight.current = outputHeight;
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+
+    const onMove = (ev: MouseEvent) => {
+      if (!resizing.current) return;
+      const delta = startY.current - ev.clientY;
+      setOutputHeight(Math.max(100, Math.min(500, startHeight.current + delta)));
+    };
+    const onUp = () => {
+      resizing.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+
+  // ── Monaco theme registration ──────────────────────────
+
+  const handleEditorMount = useCallback((editor: unknown, monaco: { editor: { defineTheme: (name: string, data: unknown) => void; setTheme: (name: string) => void } }) => {
+    monaco.editor.defineTheme('syncspace-dark', syncspaceDark);
+    monaco.editor.defineTheme('syncspace-light', syncspaceLight);
+    monaco.editor.setTheme(resolvedTheme === 'dark' ? 'syncspace-dark' : 'syncspace-light');
+
+    // Store refs for y-monaco binding
+    editorRef.current = editor;
+    monacoRef.current = monaco;
+
+    // Track cursor position
+    const monacoEditor = editor as import('monaco-editor').editor.IStandaloneCodeEditor;
+    if (monacoEditor?.onDidChangeCursorPosition) {
+      const pos = monacoEditor.getPosition();
+      if (pos) {
+        setCursorPos({ line: pos.lineNumber, col: pos.column });
+      }
+      monacoEditor.onDidChangeCursorPosition((e) => {
+        setCursorPos({ line: e.position.lineNumber, col: e.position.column });
+      });
+    }
+
+    // Register ⌘K action within Monaco editor
+    const monacoAny = monaco as any;
+    if (monacoEditor?.addAction && monacoAny?.KeyMod && monacoAny?.KeyCode) {
+      monacoEditor.addAction({
+        id: 'syncspace-command-palette',
+        label: 'SyncSpace: Command Palette',
+        keybindings: [monacoAny.KeyMod.CtrlCmd | monacoAny.KeyCode.KeyK],
+        run: () => {
+          setShowCommandPalette(true);
+        },
+      });
+    }
+
+    // If SyncProvider is already connected, bind now
+    const provider = tabManager.tabState.activeTabPath ? tabManager.getProvider(tabManager.tabState.activeTabPath) : null;
+    if (provider) {
+      bindYMonaco(provider);
+    }
+  }, [resolvedTheme, bindYMonaco, tabManager]);
+
+  // Update Monaco theme when system theme changes
+  useEffect(() => {
+    // Monaco might not be loaded yet; this is a best-effort approach
+    try {
+      const monaco = (window as unknown as { monaco?: { editor: { setTheme: (name: string) => void } } }).monaco;
+      if (monaco) {
+        monaco.editor.setTheme(resolvedTheme === 'dark' ? 'syncspace-dark' : 'syncspace-light');
+      }
+    } catch {
+      // Monaco not available yet, skip
+    }
+  }, [resolvedTheme]);
+
+  // ── Command Palette Actions ─────────────────────────────
+  const paletteActions: PaletteAction[] = useMemo(() => {
+    const actions: PaletteAction[] = [];
+
+    // 1. Files in workspace
+    for (const f of files) {
+      const fileName = f.path.split('/').pop() || f.path;
+      actions.push({
+        id: `file-${f.path}`,
+        label: fileName,
+        filePath: f.path,
+        category: 'file',
+        icon: <File size={14} style={{ color: getFileIconColor(f.path) }} />,
+        onSelect: () => {
+          tabManager.openTab(f);
+        },
+      });
+    }
+
+    // 2. Navigation
+    actions.push({
+      id: 'cmd-goto-line',
+      label: 'Go to Line... (:line)',
+      category: 'navigation',
+      icon: <Hash size={14} />,
+      shortcut: ':line',
+      onSelect: () => {},
+    });
+
+    // 3. Commands
+    actions.push({
+      id: 'cmd-run',
+      label: 'Run Code',
+      category: 'command',
+      icon: <Play size={14} />,
+      shortcut: '⌘Enter',
+      onSelect: () => {
+        runCode();
+      },
+    });
+
+    actions.push({
+      id: 'cmd-share',
+      label: 'Share Workspace & Manage Members',
+      category: 'command',
+      icon: <Users size={14} />,
+      onSelect: () => {
+        setShowShareModal(true);
+      },
+    });
+
+    actions.push({
+      id: 'cmd-toggle-sidebar',
+      label: showSidebar ? 'Hide Sidebar (File Explorer)' : 'Show Sidebar (File Explorer)',
+      category: 'command',
+      icon: <Folder size={14} />,
+      onSelect: () => {
+        setShowSidebar(prev => !prev);
+      },
+    });
+
+    actions.push({
+      id: 'cmd-toggle-output',
+      label: showOutput ? 'Hide Output Panel' : 'Show Output Panel',
+      category: 'command',
+      icon: <Terminal size={14} />,
+      onSelect: () => {
+        setShowOutput(prev => !prev);
+      },
+    });
+
+    actions.push({
+      id: 'cmd-toggle-ai',
+      label: showAI ? 'Hide AI Assistant' : 'Show AI Assistant',
+      category: 'command',
+      icon: <Bot size={14} />,
+      shortcut: '⌘I',
+      onSelect: () => {
+        setShowAI(prev => !prev);
+      },
+    });
+
+    actions.push({
+      id: 'cmd-toggle-chat',
+      label: showChat ? 'Hide Workspace Chat' : 'Show Workspace Chat',
+      category: 'command',
+      icon: <MessageSquare size={14} />,
+      onSelect: () => {
+        setShowChat(prev => {
+          if (!prev) setUnreadChatCount(0);
+          return !prev;
+        });
+      },
+    });
+
+    actions.push({
+      id: 'cmd-toggle-split',
+      label: tabManager.tabState.splitViewActive ? 'Close Split View' : 'Split Editor Right',
+      category: 'command',
+      icon: <Columns2 size={14} />,
+      onSelect: () => {
+        tabManager.toggleSplitView();
+      },
+    });
+
+    actions.push({
+      id: 'cmd-toggle-theme',
+      label: `Switch to ${resolvedTheme === 'dark' ? 'Light' : 'Dark'} Mode`,
+      category: 'command',
+      icon: resolvedTheme === 'dark' ? <Sun size={14} /> : <Moon size={14} />,
+      onSelect: () => {
+        toggleTheme();
+      },
+    });
+
+    return actions;
+  }, [files, runCode, showSidebar, showOutput, showAI, showChat, tabManager, resolvedTheme, toggleTheme]);
+
+  // ── Loading / Error states ─────────────────────────────
+
+  if (authLoading || loading) {
+    return (
+      <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--color-bg-app)' }}>
+        <div style={{ textAlign: 'center' }}>
+          <div className="spinner" style={{ width: '32px', height: '32px', margin: '0 auto 16px' }} />
+          <p style={{ color: 'var(--color-text-faint)', fontSize: 'var(--text-sm)' }}>Loading workspace...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error && !workspace) {
+    return (
+      <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--color-bg-app)' }}>
+        <div style={{ textAlign: 'center' }}>
+          <p style={{ color: 'var(--color-danger)', fontSize: 'var(--text-md)', marginBottom: 'var(--space-4)' }}>{error}</p>
+          <Link href="/dashboard" className="btn btn-secondary">Back to Dashboard</Link>
+        </div>
+      </div>
+    );
+  }
+
+  const canRun = activeFile && ['python', 'javascript', 'go', 'ruby'].includes(getLanguage(activeFile.path));
+
+  // ── Render ─────────────────────────────────────────────
+
+  return (
+    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--color-bg-app)' }}>
+      {/* Error toast */}
+      {error && workspace && <div className="error-toast">{error}</div>}
+      {/* ─── Top Toolbar ─── */}
+      <header style={{
+        height: '44px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '0 var(--space-3)', borderBottom: '1px solid var(--color-border-subtle)',
+        background: 'var(--color-bg-surface)', flexShrink: 0,
+      }}>
+        {/* Left: nav + name */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+          <Link href="/dashboard" className="btn-icon" aria-label="Back to dashboard">
+            <ArrowLeft size={16} />
+          </Link>
+          <div style={{ width: '1px', height: '16px', background: 'var(--color-border)' }} />
+          <Logo size="sm" showWordmark={false} />
+          <span style={{ color: 'var(--color-text-faint)', fontSize: 'var(--text-sm)' }}>/</span>
+          <span style={{ color: 'var(--color-text)', fontSize: 'var(--text-sm)', fontWeight: 500 }}>
+            {workspace?.name}
+          </span>
+        </div>
+
+        {/* Center: Action buttons */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)' }}>
+          {/* Sync status */}
+          <span style={{
+            fontSize: '11px', color: syncStatus === 'synced' ? 'var(--color-success)' : 'var(--color-text-faint)',
+            display: 'flex', alignItems: 'center', gap: '4px',
+          }}>
+            <span style={{
+              width: '6px', height: '6px', borderRadius: '50%',
+              background: syncStatus === 'synced' ? 'var(--color-success)' : syncStatus === 'connecting' ? 'var(--color-warning)' : 'var(--color-danger)',
+              display: 'inline-block',
+            }} />
+            {syncStatus === 'synced' ? 'Synced' : syncStatus === 'connecting' ? 'Connecting' : 'Offline'}
+          </span>
+
+          {/* Run */}
+          <button onClick={runCode} disabled={!canRun || executing} className="btn btn-run btn-sm">
+            {executing ? <Loader2 size={14} className="spin-icon" /> : <Play size={14} />}
+            {executing ? 'Running' : 'Run'}
+            <span className="kbd" style={{ background: 'rgba(255,255,255,0.15)', color: 'rgba(255,255,255,0.7)', borderColor: 'rgba(255,255,255,0.2)' }}>
+              Enter
+            </span>
+          </button>
+
+          <div style={{ width: '1px', height: '16px', background: 'var(--color-border)' }} />
+
+          {/* Output toggle */}
+          <button
+            onClick={() => setShowOutput(!showOutput)}
+            className="btn btn-ghost btn-sm"
+            style={{ background: showOutput ? 'var(--color-bg-hover)' : undefined }}
+          >
+            <Terminal size={14} /> Output
+          </button>
+
+          {/* AI toggle */}
+          <button
+            onClick={() => setShowAI(!showAI)}
+            className="btn btn-ghost btn-sm"
+            style={{
+              background: showAI ? 'var(--color-accent-subtle)' : undefined,
+              color: showAI ? 'var(--color-accent)' : undefined,
+            }}
+          >
+            <Bot size={14} /> AI
+            <span className="kbd">I</span>
+          </button>
+
+          {/* Workspace Chat toggle */}
+          <button
+            id="chat-toggle-btn"
+            onClick={() => {
+              setShowChat(!showChat);
+              if (!showChat) setUnreadChatCount(0);
+            }}
+            className="btn btn-ghost btn-sm"
+            style={{
+              position: 'relative',
+              background: showChat ? 'var(--color-accent-subtle)' : undefined,
+              color: showChat ? 'var(--color-accent)' : undefined,
+            }}
+            title="Workspace Chat"
+          >
+            <MessageSquare size={14} /> Chat
+            {unreadChatCount > 0 && !showChat && (
+              <span
+                id="chat-unread-badge"
+                style={{
+                  position: 'absolute',
+                  top: '-4px',
+                  right: '-4px',
+                  background: 'var(--color-accent-solid)',
+                  color: '#FFFFFF',
+                  fontSize: '9px',
+                  fontWeight: 700,
+                  minWidth: '16px',
+                  height: '16px',
+                  borderRadius: '8px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  padding: '0 3px',
+                  boxShadow: 'var(--shadow-sm)',
+                }}
+              >
+                {unreadChatCount > 9 ? '9+' : unreadChatCount}
+              </span>
+            )}
+          </button>
+
+          <div style={{ width: '1px', height: '16px', background: 'var(--color-border)' }} />
+
+          {/* Command Palette button */}
+          <button
+            onClick={() => setShowCommandPalette(true)}
+            className="btn btn-ghost btn-sm"
+            style={{ display: 'flex', alignItems: 'center', gap: '4px' }}
+            title="Command Palette (⌘K)"
+          >
+            <Command size={13} />
+            <span style={{ fontSize: '12px' }}>Search</span>
+            <kbd className="kbd" style={{ fontSize: '9px', padding: '1px 4px' }}>⌘K</kbd>
+          </button>
+        </div>
+
+        {/* Right: presence avatars + user + theme */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+          {/* Peer count */}
+          {peerCount > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)', marginRight: 'var(--space-1)' }}>
+              <Users size={14} style={{ color: 'var(--color-text-faint)' }} />
+              <span style={{ fontSize: '11px', color: 'var(--color-text-faint)' }}>
+                {peerCount} peer{peerCount !== 1 ? 's' : ''}
+              </span>
+            </div>
+          )}
+          {/* Share button */}
+          <button
+            onClick={() => setShowShareModal(true)}
+            className="btn btn-ghost btn-sm"
+            style={{ display: 'flex', alignItems: 'center', gap: '4px' }}
+            title="Share Workspace & Manage Members"
+          >
+            <Users size={14} />
+            <span>Share</span>
+          </button>
+          <div style={{ width: '1px', height: '16px', background: 'var(--color-border)' }} />
+          <ThemeToggle mode="toggle" />
+          <div style={{
+            width: '24px', height: '24px', borderRadius: '50%',
+            background: 'var(--color-accent-solid)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: '11px', fontWeight: 600, color: 'white',
+          }}>
+            {user?.username?.charAt(0).toUpperCase()}
+          </div>
+        </div>
+      </header>
+
+      {/* ─── Main Content ─── */}
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+        {/* ─── File Sidebar ─── */}
+        {showSidebar && (
+          <aside style={{
+            width: '200px', borderRight: '1px solid var(--color-border-subtle)',
+            background: 'var(--color-bg-surface)', display: 'flex', flexDirection: 'column', flexShrink: 0,
+          }}>
+          <div style={{
+            padding: 'var(--space-2) var(--space-3)',
+            fontSize: 'var(--text-xs)', fontWeight: 500,
+            color: 'var(--color-text-faint)', textTransform: 'uppercase',
+            letterSpacing: '0.04em', borderBottom: '1px solid var(--color-border-subtle)',
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          }}>
+            <span>Explorer</span>
+            <button
+              onClick={() => setShowNewFile(true)}
+              className="btn-icon"
+              style={{ width: '20px', height: '20px' }}
+              aria-label="New file"
+            >
+              <Plus size={14} />
+            </button>
+          </div>
+
+          {/* New file input */}
+          {showNewFile && (
+            <div style={{
+              padding: 'var(--space-1) var(--space-2)',
+              borderBottom: '1px solid var(--color-border-subtle)',
+              display: 'flex', gap: '4px',
+            }}>
+              <input
+                autoFocus
+                value={newFilePath}
+                onChange={e => setNewFilePath(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') createNewFile();
+                  if (e.key === 'Escape') { setShowNewFile(false); setNewFilePath(''); }
+                }}
+                placeholder="filename.ext"
+                className="input"
+                style={{ flex: 1, fontSize: '12px', padding: '4px 8px', height: '28px', fontFamily: 'var(--font-mono)' }}
+              />
+              <button onClick={createNewFile} disabled={!newFilePath.trim() || creatingFile} className="btn-icon" style={{ width: '24px', height: '24px' }}>
+                {creatingFile ? <Loader2 size={12} className="spin-icon" /> : <Check size={14} />}
+              </button>
+              <button onClick={() => { setShowNewFile(false); setNewFilePath(''); }} className="btn-icon" style={{ width: '24px', height: '24px' }}>
+                <X size={14} />
+              </button>
+            </div>
+          )}
+
+          <div style={{ flex: 1, overflow: 'auto', padding: 'var(--space-1) 0' }}>
+            {files.map(file => (
+              <div
+                key={file.id}
+                style={{
+                  display: 'flex', alignItems: 'center',
+                  background: activeFile?.path === file.path ? 'var(--color-bg-hover)' : 'transparent',
+                  borderLeft: activeFile?.path === file.path
+                    ? '2px solid var(--color-accent)' : '2px solid transparent',
+                  transition: 'all var(--duration-fast) var(--easing)',
+                }}
+                className="file-row"
+              >
+                <button
+                  onClick={() => selectFile(file)}
+                  style={{
+                    flex: 1, display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+                    padding: 'var(--space-1) var(--space-3)',
+                    border: 'none', background: 'transparent',
+                    color: activeFile?.path === file.path ? 'var(--color-text)' : 'var(--color-text-muted)',
+                    fontSize: 'var(--text-sm)', cursor: 'pointer', textAlign: 'left',
+                    fontFamily: 'var(--font-mono)',
+                  }}
+                >
+                  <File size={14} style={{ color: getFileIconColor(file.path), flexShrink: 0 }} />
+                  <span className="truncate">{file.path}</span>
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); deleteExistingFile(file); }}
+                  className="btn-icon file-delete-btn"
+                  style={{ width: '20px', height: '20px', marginRight: '4px', opacity: 0 }}
+                  aria-label={`Delete ${file.path}`}
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+          <div style={{
+            padding: 'var(--space-2) var(--space-3)',
+            borderTop: '1px solid var(--color-border-subtle)',
+          }}>
+            <span className="badge" style={{ fontSize: '11px' }}>
+              {workspace?.language || workspace?.template}
+            </span>
+          </div>
+        </aside>
+      )}
+
+        {/* ─── Editor + Output ─── */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          {/* Multi-tab bar */}
+          <TabBar
+            tabs={tabManager.tabState.openTabs}
+            activeTabPath={tabManager.tabState.activeTabPath}
+            splitTabPath={tabManager.tabState.splitTabPath}
+            splitViewActive={tabManager.tabState.splitViewActive}
+            onSwitch={tabManager.switchTab}
+            onClose={tabManager.closeTab}
+            onReorder={tabManager.reorderTabs}
+            onToggleSplit={tabManager.toggleSplitView}
+          />
+
+          {/* Editor panes — single or split */}
+          <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+            {/* Primary editor pane */}
+            <div style={{ flex: 1, overflow: 'hidden' }}>
+              {activeFile ? (
+                <Editor
+                  key={`editor-${activeFile.path}`}
+                  height="100%"
+                  language={getLanguage(activeFile.path)}
+                  defaultValue={editorContent}
+                  theme={resolvedTheme === 'dark' ? 'syncspace-dark' : 'syncspace-light'}
+                  onMount={handleEditorMount}
+                  options={{
+                    fontSize: 14,
+                    fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+                    fontLigatures: false,
+                    lineNumbers: 'on',
+                    minimap: { enabled: true, scale: 1 },
+                    scrollBeyondLastLine: false,
+                    padding: { top: 12, bottom: 12 },
+                    renderLineHighlight: 'all',
+                    smoothScrolling: true,
+                    cursorBlinking: 'smooth',
+                    cursorSmoothCaretAnimation: 'on',
+                    bracketPairColorization: { enabled: true },
+                    tabSize: 2,
+                    automaticLayout: true,
+                    suggest: { showMethods: true, showFunctions: true },
+                  }}
+                />
+              ) : (
+                <div className="empty-state" style={{ height: '100%' }}>
+                  <File size={48} className="empty-state-icon" />
+                  <p className="empty-state-title">Select a file to start editing</p>
+                </div>
+              )}
+            </div>
+
+            {/* Split pane (when active) */}
+            {tabManager.tabState.splitViewActive && tabManager.tabState.splitTabPath && (() => {
+              const splitFile = tabManager.tabState.openTabs.find(t => t.path === tabManager.tabState.splitTabPath);
+              if (!splitFile) return null;
+              return (
+                <>
+                  <div style={{
+                    width: '3px', cursor: 'col-resize', flexShrink: 0,
+                    background: 'var(--color-border-subtle)',
+                  }} />
+                  <div style={{ flex: 1, overflow: 'hidden' }}>
+                    <Editor
+                      key={`split-${splitFile.path}`}
+                      height="100%"
+                      language={getLanguage(splitFile.path)}
+                      defaultValue={splitFile.file.content}
+                      theme={resolvedTheme === 'dark' ? 'syncspace-dark' : 'syncspace-light'}
+                      onMount={(editor, monaco) => {
+                        // Bind split editor to its own SyncProvider
+                        monaco.editor.defineTheme('syncspace-dark', syncspaceDark);
+                        monaco.editor.defineTheme('syncspace-light', syncspaceLight);
+                        monaco.editor.setTheme(resolvedTheme === 'dark' ? 'syncspace-dark' : 'syncspace-light');
+                        const provider = tabManager.getProvider(splitFile.path);
+                        if (provider) {
+                          const model = editor.getModel();
+                          if (model) {
+                            createYMonacoBinding(
+                              monaco, provider.getText(), model,
+                              new Set([editor]), provider.awareness,
+                            );
+                          }
+                        }
+                      }}
+                      options={{
+                        fontSize: 14,
+                        fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+                        fontLigatures: false,
+                        lineNumbers: 'on',
+                        minimap: { enabled: false },
+                        scrollBeyondLastLine: false,
+                        padding: { top: 12, bottom: 12 },
+                        renderLineHighlight: 'all',
+                        smoothScrolling: true,
+                        cursorBlinking: 'smooth',
+                        cursorSmoothCaretAnimation: 'on',
+                        bracketPairColorization: { enabled: true },
+                        tabSize: 2,
+                        automaticLayout: true,
+                      }}
+                    />
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+
+          {/* ─── Output Panel ─── */}
+          {showOutput && (
+            <>
+              {/* Resize handle */}
+              <div
+                onMouseDown={onResizeStart}
+                style={{
+                  height: '3px', cursor: 'row-resize', flexShrink: 0,
+                  background: 'var(--color-border-subtle)',
+                  transition: 'background var(--duration-fast)',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-accent)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'var(--color-border-subtle)')}
+              />
+              <div style={{
+                height: `${outputHeight}px`, flexShrink: 0,
+                background: 'var(--color-bg-app)', display: 'flex', flexDirection: 'column',
+              }}>
+                {/* Output header */}
+                <div style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  padding: 'var(--space-1) var(--space-3)',
+                  borderBottom: '1px solid var(--color-border-subtle)', flexShrink: 0,
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+                    <span style={{
+                      fontSize: 'var(--text-xs)', fontWeight: 500,
+                      color: execResult
+                        ? execResult.exit_code === 0 ? 'var(--color-success)' : 'var(--color-danger)'
+                        : 'var(--color-text-faint)',
+                    }}>
+                      Output
+                    </span>
+                    {execResult && (
+                      <>
+                        <span className={`badge badge-status ${execResult.exit_code === 0 ? 'badge-success' : 'badge-danger'}`}>
+                          {execResult.exit_code === 0 ? 'Exit 0' : `Exit ${execResult.exit_code}`}
+                        </span>
+                        <span style={{ fontSize: '11px', color: 'var(--color-text-faint)' }}>
+                          {execResult.duration_ms}ms
+                        </span>
+                        {execResult.timed_out && (
+                          <span className="badge badge-status badge-warning">TIMED OUT</span>
+                        )}
+                        {execResult.output_capped && (
+                          <span className="badge badge-status badge-warning">TRUNCATED</span>
+                        )}
+                      </>
+                    )}
+                    {executing && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                        <div className="spinner" style={{ width: '12px', height: '12px' }} />
+                        <span style={{ fontSize: '11px', color: 'var(--color-warning)' }}>Executing...</span>
+                      </div>
+                    )}
+                  </div>
+                  <button onClick={() => setShowOutput(false)} className="btn-icon" style={{ width: '24px', height: '24px' }}>
+                    <X size={14} />
+                  </button>
+                </div>
+
+                {/* Output content */}
+                <div style={{
+                  flex: 1, overflow: 'auto', padding: 'var(--space-3)',
+                  fontFamily: 'var(--font-mono)', fontSize: 'var(--text-sm)', lineHeight: 1.6,
+                }}>
+                  {execResult ? (
+                    <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                      {execResult.stdout && (
+                        <span style={{ color: 'var(--color-text)' }}>{execResult.stdout}</span>
+                      )}
+                      {execResult.stderr && (
+                        <span style={{ color: 'var(--color-danger)' }}>
+                          {execResult.stdout ? '\n' : ''}{execResult.stderr}
+                        </span>
+                      )}
+                      {!execResult.stdout && !execResult.stderr && (
+                        <span style={{ color: 'var(--color-text-faint)', fontStyle: 'italic' }}>
+                          (no output)
+                        </span>
+                      )}
+                    </pre>
+                  ) : !executing ? (
+                    <div style={{ color: 'var(--color-text-faint)', fontSize: 'var(--text-xs)' }}>
+                      <p>Press <span className="kbd">Enter</span> or click <strong>Run</strong> to execute code in a sandboxed container.</p>
+                      <p style={{ marginTop: 'var(--space-2)', opacity: 0.6 }}>
+                        Sandbox: network disabled, read-only fs, 128MB memory, 10s timeout
+                      </p>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* ─── AI Chat Panel ─── */}
+        {showAI && (
+          <aside style={{
+            width: '360px', borderLeft: '1px solid var(--color-border-subtle)',
+            background: 'var(--color-bg-surface)', display: 'flex', flexDirection: 'column', flexShrink: 0,
+          }}>
+            {/* Header */}
+            <div style={{
+              padding: 'var(--space-2) var(--space-3)',
+              borderBottom: '1px solid var(--color-border-subtle)',
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                <Bot size={16} style={{ color: 'var(--color-accent)' }} />
+                <span style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}>SyncSpace AI</span>
+                {aiInfo?.model && (
+                  <span
+                    id="ai-model-badge"
+                    style={{
+                      fontSize: '10px',
+                      padding: '1px 6px',
+                      borderRadius: 'var(--radius-control)',
+                      background: 'var(--color-bg-hover)',
+                      color: 'var(--color-text-muted)',
+                      fontFamily: 'var(--font-mono)',
+                    }}
+                  >
+                    {aiInfo.model.replace('openai/', '')}
+                  </span>
+                )}
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)' }}>
+                <button
+                  onClick={clearChat}
+                  className="btn-icon"
+                  style={{ width: '24px', height: '24px' }}
+                  title="Clear chat"
+                >
+                  <Eraser size={14} />
+                </button>
+                <button onClick={() => setShowAI(false)} className="btn-icon" style={{ width: '24px', height: '24px' }}>
+                  <X size={14} />
+                </button>
+              </div>
+            </div>
+
+            {/* Quick Actions */}
+            <div style={{
+              padding: 'var(--space-2) var(--space-3)',
+              borderBottom: '1px solid var(--color-border-subtle)',
+              display: 'flex', gap: 'var(--space-1)', flexWrap: 'wrap',
+            }}>
+              {[
+                { icon: <Wrench size={12} />, label: 'Fix', prompt: 'Find and fix all bugs in this code. Show the corrected version.' },
+                { icon: <Lightbulb size={12} />, label: 'Explain', prompt: 'Explain what this code does, step by step.' },
+                { icon: <Zap size={12} />, label: 'Optimize', prompt: 'Optimize this code for better performance and readability.' },
+                { icon: <TestTube2 size={12} />, label: 'Tests', prompt: 'Write unit tests for this code.' },
+              ].map(action => (
+                <button
+                  key={action.label}
+                  onClick={() => sendAIMessage(action.prompt)}
+                  disabled={aiLoading || !activeFile || (aiInfo !== null && (!aiInfo.configured || !aiInfo.available))}
+                  className="btn btn-ghost btn-sm"
+                  style={{ gap: '4px' }}
+                >
+                  {action.icon} {action.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Chat Messages */}
+            <div style={{ flex: 1, overflow: 'auto', padding: 'var(--space-3)', display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+              {aiMessages.map((msg, i) => (
+                <div key={i} style={{
+                  display: 'flex', flexDirection: 'column', gap: 'var(--space-1)',
+                  alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start',
+                }}>
+                  <div style={{
+                    maxWidth: '95%', padding: 'var(--space-2) var(--space-3)',
+                    borderRadius: 'var(--radius-panel)',
+                    fontSize: 'var(--text-sm)', lineHeight: 1.55,
+                    background: msg.role === 'user' ? 'var(--color-accent-solid)' : 'var(--color-bg-raised)',
+                    color: msg.role === 'user' ? 'white' : 'var(--color-text)',
+                    whiteSpace: 'normal', wordBreak: 'break-word',
+                  }}>
+                    <MessageContent content={msg.content} />
+                  </div>
+                  {msg.role === 'assistant' && (msg.codeBlock || msg.tokensUsed) && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+                      {msg.codeBlock && (
+                        <button
+                          onClick={() => applyCode(msg.codeBlock!)}
+                          className="btn btn-ghost btn-sm"
+                          style={{ color: 'var(--color-success)' }}
+                        >
+                          <Check size={12} /> Apply to Editor
+                        </button>
+                      )}
+                      {msg.tokensUsed && (
+                        <span style={{ fontSize: '10px', color: 'var(--color-text-faint)' }}>
+                          {msg.tokensUsed} tokens{msg.model ? ` · ${msg.model}` : ''}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+              {aiLoading && (
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 'var(--space-2)',
+                  padding: 'var(--space-2) var(--space-3)',
+                  background: 'var(--color-bg-raised)', borderRadius: 'var(--radius-panel)',
+                }}>
+                  <div className="spinner" style={{ width: '14px', height: '14px' }} />
+                  <span style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-faint)' }}>Thinking...</span>
+                </div>
+              )}
+              <div ref={chatEndRef} />
+            </div>
+
+            {/* Input */}
+            <div style={{
+              padding: 'var(--space-2) var(--space-3)',
+              borderTop: '1px solid var(--color-border-subtle)',
+              display: 'flex', gap: 'var(--space-2)',
+            }}>
+              <input
+                value={aiInput}
+                onChange={e => setAIInput(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendAIMessage(aiInput); } }}
+                placeholder={
+                  aiInfo && !aiInfo.configured
+                    ? "AI isn't configured on this server"
+                    : aiInfo && !aiInfo.available
+                    ? "AI unavailable"
+                    : activeFile
+                    ? `Ask about ${activeFile.path}...`
+                    : 'Select a file first...'
+                }
+                disabled={aiLoading || !activeFile || (aiInfo !== null && (!aiInfo.configured || !aiInfo.available))}
+                className="input"
+                style={{ flex: 1, fontSize: 'var(--text-sm)' }}
+              />
+              <button
+                onClick={() => sendAIMessage(aiInput)}
+                disabled={!aiInput.trim() || aiLoading || !activeFile || (aiInfo !== null && (!aiInfo.configured || !aiInfo.available))}
+                className="btn btn-primary btn-sm"
+                style={{ padding: 'var(--space-2)' }}
+              >
+                <Send size={14} />
+              </button>
+            </div>
+          </aside>
+        )}
+
+        {/* ─── Workspace Chat Panel ─── */}
+        <WorkspaceChat
+          slug={slug}
+          isOpen={showChat}
+          currentUserId={user?.id}
+          currentUsername={user?.username}
+          onClose={() => setShowChat(false)}
+        />
+      </div>
+
+      {/* ─── Status Bar ─── */}
+      <footer style={{
+        height: '24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '0 var(--space-3)', background: 'var(--color-bg-surface)',
+        borderTop: '1px solid var(--color-border-subtle)',
+        color: 'var(--color-text-faint)', fontSize: '11px', flexShrink: 0,
+        userSelect: 'none',
+      }}>
+        {/* Left: Sync Status, Peers, Language, Open Tabs */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-4)' }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }} title={`Sync Status: ${syncStatus}`}>
+            <span style={{
+              width: '7px', height: '7px', borderRadius: '50%',
+              background: syncStatus === 'synced' ? 'var(--color-success)' : syncStatus === 'connecting' ? 'var(--color-warning)' : 'var(--color-danger)',
+              display: 'inline-block',
+            }} />
+            <span style={{ fontWeight: 500, color: syncStatus === 'synced' ? 'var(--color-success)' : undefined }}>
+              {syncStatus === 'synced' ? 'Synced' : syncStatus === 'connecting' ? 'Connecting' : 'Offline'}
+            </span>
+          </span>
+
+          <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }} title="Connected peers in workspace">
+            <Users size={12} />
+            <span>{peerCount > 0 ? `${peerCount + 1} online (${peerCount} peer${peerCount > 1 ? 's' : ''})` : '1 online'}</span>
+          </span>
+
+          {activeFile && (
+            <span style={{ fontWeight: 500, color: 'var(--color-text-muted)' }}>
+              {getLanguageLabel(activeFile.path)}
+            </span>
+          )}
+
+          {tabManager.tabState.openTabs.length > 0 && (
+            <span>
+              {tabManager.tabState.openTabs.length} tab{tabManager.tabState.openTabs.length > 1 ? 's' : ''} open
+            </span>
+          )}
+        </div>
+
+        {/* Right: Line/Col, Indent, Encoding, Line Endings, File Path, Palette Trigger */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-4)' }}>
+          {activeFile && (
+            <button
+              onClick={() => setShowCommandPalette(true)}
+              style={{
+                background: 'none', border: 'none', padding: 0,
+                color: 'var(--color-text-muted)', fontSize: '11px',
+                cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px',
+              }}
+              title="Click to jump to line (⌘K :line)"
+            >
+              <Hash size={11} style={{ opacity: 0.7 }} />
+              <span>Ln {cursorPos.line}, Col {cursorPos.col}</span>
+            </button>
+          )}
+
+          <span>Spaces: 2</span>
+          <span>UTF-8</span>
+          <span>LF</span>
+
+          {activeFile && (
+            <span style={{ color: 'var(--color-text-muted)', fontFamily: 'var(--font-mono)' }}>
+              {activeFile.path}
+            </span>
+          )}
+
+          {tabManager.tabState.splitViewActive && (
+            <span style={{
+              color: 'var(--color-success)', fontWeight: 500,
+              padding: '0 4px', borderRadius: '3px', background: 'rgba(16, 185, 129, 0.1)',
+            }}>
+              Split
+            </span>
+          )}
+
+          <button
+            onClick={() => setShowCommandPalette(true)}
+            style={{
+              background: 'none', border: 'none', padding: '0 4px',
+              color: 'var(--color-text-faint)', fontSize: '10px',
+              cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '3px',
+              borderRadius: '3px',
+            }}
+            title="Open Command Palette (⌘K)"
+          >
+            <Command size={10} />
+            <span>⌘K</span>
+          </button>
+        </div>
+      </footer>
+
+      {/* ─── Command Palette Modal ─── */}
+      <CommandPalette
+        isOpen={showCommandPalette}
+        onClose={() => setShowCommandPalette(false)}
+        actions={paletteActions}
+      />
+
+      {/* ─── Share / Members Modal ─── */}
+      <ShareModal
+        isOpen={showShareModal}
+        onClose={() => setShowShareModal(false)}
+        slug={slug}
+        currentUserId={user?.id}
+      />
+    </div>
+  );
+}
+
+// ── Markdown Message Renderer ────────────────────────────
+
+function MessageContent({ content }: { content: string }) {
+  // Split into code blocks and text segments
+  const segments: { type: 'text' | 'code'; content: string; lang?: string }[] = [];
+  const codeBlockRegex = /```(\w*)\n?([\s\S]*?)```/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = codeBlockRegex.exec(content)) !== null) {
+    if (match.index > lastIndex) {
+      segments.push({ type: 'text', content: content.slice(lastIndex, match.index) });
+    }
+    segments.push({ type: 'code', content: match[2], lang: match[1] });
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < content.length) {
+    segments.push({ type: 'text', content: content.slice(lastIndex) });
+  }
+
+  return (
+    <>
+      {segments.map((seg, si) => {
+        if (seg.type === 'code') {
+          return (
+            <pre key={si} style={{
+              margin: 'var(--space-2) 0', padding: 'var(--space-2) var(--space-3)',
+              borderRadius: 'var(--radius-control)',
+              background: 'var(--color-bg-app)', fontSize: 'var(--text-xs)', overflow: 'auto',
+              fontFamily: 'var(--font-mono)', lineHeight: 1.5,
+              color: 'var(--color-text)', border: '1px solid var(--color-border-subtle)',
+              whiteSpace: 'pre-wrap',
+            }}>{seg.content.trim()}</pre>
+          );
+        }
+
+        const lines = seg.content.split('\n');
+        return (
+          <span key={si}>
+            {lines.map((line, li) => {
+              const trimmed = line.trim();
+              if (trimmed.startsWith('### ')) return <div key={li} style={{ fontWeight: 600, fontSize: 'var(--text-sm)', marginTop: 'var(--space-2)' }}>{renderInline(trimmed.slice(4))}</div>;
+              if (trimmed.startsWith('## ')) return <div key={li} style={{ fontWeight: 600, fontSize: 'var(--text-base)', marginTop: 'var(--space-3)' }}>{renderInline(trimmed.slice(3))}</div>;
+              if (trimmed.startsWith('- ') || trimmed.startsWith('* ') || trimmed.startsWith('• ')) {
+                return <div key={li} style={{ paddingLeft: 'var(--space-3)', position: 'relative', marginTop: '2px' }}><span style={{ position: 'absolute', left: 0 }}>-</span> {renderInline(trimmed.slice(2))}</div>;
+              }
+              if (trimmed === '') return <div key={li} style={{ height: '4px' }} />;
+              return <div key={li} style={{ marginTop: li > 0 ? '2px' : 0 }}>{renderInline(trimmed)}</div>;
+            })}
+          </span>
+        );
+      })}
+    </>
+  );
+}
+
+// Render inline markdown: **bold**, `code`, *italic*
+function renderInline(text: string): React.ReactNode[] {
+  const parts: React.ReactNode[] = [];
+  const inlineRegex = /(\*\*(.+?)\*\*|`([^`]+)`|\*(.+?)\*)/g;
+  let lastIdx = 0;
+  let m;
+  let key = 0;
+
+  while ((m = inlineRegex.exec(text)) !== null) {
+    if (m.index > lastIdx) parts.push(<span key={key++}>{text.slice(lastIdx, m.index)}</span>);
+    if (m[2]) parts.push(<strong key={key++} style={{ fontWeight: 600 }}>{m[2]}</strong>);
+    else if (m[3]) parts.push(
+      <code key={key++} style={{
+        padding: '1px 5px', borderRadius: '4px', fontSize: '12px',
+        background: 'var(--color-accent-subtle)', color: 'var(--color-accent)',
+        fontFamily: 'var(--font-mono)',
+      }}>{m[3]}</code>
+    );
+    else if (m[4]) parts.push(<em key={key++}>{m[4]}</em>);
+    lastIdx = m.index + m[0].length;
+  }
+  if (lastIdx < text.length) parts.push(<span key={key++}>{text.slice(lastIdx)}</span>);
+  return parts;
+}

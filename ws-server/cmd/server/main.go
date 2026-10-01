@@ -1,0 +1,284 @@
+package main
+
+import (
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
+	"github.com/syncspace/ws-server/internal/auth"
+	"github.com/syncspace/ws-server/internal/database"
+	"github.com/syncspace/ws-server/internal/handlers"
+	"github.com/syncspace/ws-server/internal/middleware"
+	"github.com/syncspace/ws-server/internal/realtime"
+)
+
+func main() {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	log.Println("Starting SyncSpace WS Server...")
+
+	// Load configuration from environment
+	port := getEnv("PORT", "8080")
+	jwtSecret := getEnv("JWT_SECRET", "dev-jwt-secret-change-in-production")
+	corsOrigin := getEnv("CORS_ORIGIN", "http://localhost:3000")
+	env := getEnv("ENV", "development")
+
+	// ── Env validation ───────────────────────────────────────────
+	// Refuse to start in production with default/weak JWT secret
+	if env == "production" {
+		if jwtSecret == "dev-jwt-secret-change-in-production" || len(jwtSecret) < 32 {
+			log.Fatal("FATAL: JWT_SECRET must be set to a strong secret (>= 32 chars) in production")
+		}
+	} else if jwtSecret == "dev-jwt-secret-change-in-production" {
+		log.Println("WARNING: Using default JWT secret — change this before deploying")
+	}
+
+	// PostgreSQL configuration
+	dbHost := getEnv("POSTGRES_HOST", "localhost")
+	dbPort := getEnv("POSTGRES_PORT", "5432")
+	dbUser := getEnv("POSTGRES_USER", "syncspace")
+	dbPass := getEnv("POSTGRES_PASSWORD", "syncspace_dev")
+	dbName := getEnv("POSTGRES_DB", "syncspace")
+	migrationsDir := getEnv("MIGRATIONS_DIR", "./migrations")
+
+	// Connect to database (with retry for Docker startup)
+	db, err := database.New(dbHost, dbPort, dbUser, dbPass, dbName)
+	if err != nil {
+		log.Fatalf("Failed to connect to database: %v", err)
+	}
+	defer db.Close()
+
+	// Run migrations
+	log.Println("Running database migrations...")
+	if err := db.RunMigrations(migrationsDir); err != nil {
+		log.Fatalf("Failed to run migrations: %v", err)
+	}
+
+	// Initialize services
+	secureCookie := env == "production"
+	authService := auth.NewService(jwtSecret, secureCookie)
+
+	// Initialize rate limiters — stricter in production
+	authRate := 100 // dev/test: 100 auth attempts per minute per IP (supports rapid test suites)
+	if env == "production" {
+		authRate = 10 // production: 10 auth attempts per minute per IP (brute-force protection)
+	}
+	authLimiter := middleware.NewRateLimiter(authRate, 60*time.Second)
+	execLimiter := middleware.NewRateLimiter(30, 60*time.Second)  // 30 code executions per minute per IP
+
+	chatRate := 30 // 30 chat messages per minute per user
+	if rStr := os.Getenv("CHAT_RATE_LIMIT"); rStr != "" {
+		if rInt, err := strconv.Atoi(rStr); err == nil && rInt > 0 {
+			chatRate = rInt
+		}
+	}
+	chatLimiter := middleware.NewRateLimiter(chatRate, 60*time.Second)
+
+	// Initialize WebSocket hub for real-time collaboration
+	hub := realtime.NewHub()
+
+	// Initialize Redis relay for cross-instance WebSocket sync
+	redisURL := getEnv("REDIS_URL", "")
+	hub.Redis = realtime.NewRedisRelay(hub, redisURL)
+
+	// Initialize handlers
+	healthHandler := handlers.NewHealthHandler()
+	authHandler := handlers.NewAuthHandler(db, authService)
+	workspaceHandler := handlers.NewWorkspaceHandler(db, hub)
+	membersHandler := handlers.NewMembersHandler(db)
+	chatHandler := handlers.NewChatHandler(db, hub)
+	aiHandler := handlers.NewAIHandler()
+
+	// Build router
+	r := chi.NewRouter()
+
+	// Global middleware
+	r.Use(chimiddleware.RequestID)
+	r.Use(chimiddleware.RealIP)
+	r.Use(middleware.Logger)
+	r.Use(chimiddleware.Recoverer)
+	r.Use(middleware.SecurityHeaders) // Security headers on every response
+
+	// Parse CORS origins
+	allowedOrigins := []string{corsOrigin}
+	if corsOrigin != "http://localhost:3000" {
+		allowedOrigins = append(allowedOrigins, "http://localhost:3000")
+	}
+
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   allowedOrigins,
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
+		ExposedHeaders:   []string{"Link"},
+		AllowCredentials: true,
+		MaxAge:           300,
+	}))
+
+	// Public routes
+	r.Get("/health", healthHandler.Health)
+	r.Get("/api/ai/info", aiHandler.Info)
+
+	// Auth routes (public, rate-limited, no CSRF — these SET cookies)
+	r.Route("/api/auth", func(r chi.Router) {
+		r.Use(authLimiter.Middleware)
+		r.Post("/signup", authHandler.Signup)
+		r.Post("/login", authHandler.Login)
+		r.Post("/refresh", authHandler.Refresh)
+	})
+
+	// Initialize ticket store for WS authentication
+	ticketStore := realtime.NewTicketStore(hub.Redis)
+
+	// Protected routes — require auth cookie + CSRF on mutations
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.AuthMiddleware(authService))
+		r.Use(middleware.CSRFMiddleware())
+
+		r.Get("/api/auth/me", authHandler.Me)
+		r.Post("/api/auth/logout", authHandler.Logout)
+
+		r.Route("/api/workspaces", func(r chi.Router) {
+			r.Get("/", workspaceHandler.List)
+			r.Post("/", workspaceHandler.Create)
+			r.Get("/{slug}", workspaceHandler.Get)
+			r.Delete("/{slug}", workspaceHandler.Delete)
+			r.Get("/{slug}/files", workspaceHandler.ListFiles)
+			r.Get("/{slug}/file", workspaceHandler.GetFile)
+			r.Post("/{slug}/file", workspaceHandler.CreateFile)
+			r.Put("/{slug}/file", workspaceHandler.UpdateFile)
+			r.Delete("/{slug}/file", workspaceHandler.DeleteFile)
+			r.Post("/{slug}/file/rename", workspaceHandler.RenameFile)
+
+			// Beacon persist — lightweight endpoint for navigator.sendBeacon
+			// on tab close. Accepts same body as UpdateFile but returns 204
+			// immediately. Used by beforeunload handler to flush Y.Doc content.
+			r.Post("/{slug}/beacon-persist", workspaceHandler.BeaconPersist)
+
+			// Member management
+			r.Get("/{slug}/members", membersHandler.List)
+			r.Post("/{slug}/members", membersHandler.Invite)
+			r.Put("/{slug}/members/{userId}", membersHandler.UpdateRole)
+			r.Delete("/{slug}/members/{userId}", membersHandler.Remove)
+
+			// Workspace chat (persisted in Postgres, last 200 messages, real-time via Redis pub/sub)
+			r.Get("/{slug}/messages", chatHandler.List)
+			r.With(chatLimiter.UserMiddleware).Post("/{slug}/messages", chatHandler.Create)
+		})
+
+		// AI assistant (rate-limited per IP)
+		r.Group(func(r chi.Router) {
+			r.Use(execLimiter.Middleware)
+			r.Post("/api/ai/chat", aiHandler.Chat)
+		})
+
+		// WebSocket connection ticket — issues a short-lived, single-use token
+		// that replaces the old raw-JWT-in-query-string approach
+		r.Post("/api/ws-ticket", func(w http.ResponseWriter, r *http.Request) {
+			claims := middleware.GetClaims(r)
+			if claims == nil {
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+			ticket := ticketStore.Issue(claims.UserID, claims.Username)
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"ticket":"%s"}`, ticket)
+		})
+
+		// Workspace presence (who's online, which file)
+		r.Get("/api/workspaces/{slug}/presence", func(w http.ResponseWriter, r *http.Request) {
+			slug := chi.URLParam(r, "slug")
+			presence := hub.GetWorkspacePresence(slug)
+			w.Header().Set("Content-Type", "application/json")
+			if len(presence) == 0 {
+				w.Write([]byte("[]"))
+				return
+			}
+			// Manual JSON to avoid import
+			w.Write([]byte("["))
+			for i, p := range presence {
+				if i > 0 {
+					w.Write([]byte(","))
+				}
+				fmt.Fprintf(w, `{"user_id":"%s","username":"%s","file":"%s","color_slot":%d}`,
+					p.UserID, p.Username, p.File, p.ColorSlot)
+			}
+			w.Write([]byte("]"))
+		})
+	})
+
+	// WebSocket endpoint — NOT behind JWT auth middleware.
+	// Authenticates via single-use ticket instead.
+	r.Get("/ws/{slug}/{filePath}", func(w http.ResponseWriter, r *http.Request) {
+		ticketID := r.URL.Query().Get("ticket")
+		if ticketID == "" {
+			http.Error(w, "missing ticket", http.StatusUnauthorized)
+			return
+		}
+
+		// Consume ticket (single-use, 10s expiry)
+		ticket := ticketStore.Consume(ticketID)
+		if ticket == nil {
+			http.Error(w, "invalid or expired ticket", http.StatusUnauthorized)
+			return
+		}
+
+		slug := chi.URLParam(r, "slug")
+		filePath := chi.URLParam(r, "filePath")
+
+		// Verify workspace exists and user has access
+		ws, err := db.GetWorkspaceBySlug(slug)
+		if err != nil || ws == nil {
+			ws, err = db.GetWorkspaceByShortID(slug)
+			if err != nil || ws == nil {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+		}
+		role, _ := db.GetMemberRole(ws.ID, ticket.UserID)
+		if role == "" && !ws.IsPublic {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+
+		// Use short_id as the canonical room identifier (so slug and short_id both resolve to the same room)
+		realtime.ServeWS(hub, w, r, ticket.UserID, ticket.Username, ws.ShortID, filePath)
+	})
+
+	// Graceful shutdown
+	srv := &http.Server{
+		Addr:              fmt.Sprintf(":%s", port),
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		<-sigChan
+		log.Println("Shutting down gracefully...")
+		srv.Close()
+	}()
+
+	log.Printf("SyncSpace WS Server listening on :%s (env=%s)", port, env)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("Server error: %v", err)
+	}
+}
+
+func getEnv(key, fallback string) string {
+	if val := os.Getenv(key); val != "" {
+		return strings.TrimSpace(val)
+	}
+	return fallback
+}
