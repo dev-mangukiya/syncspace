@@ -5,10 +5,10 @@
  * SyncSpace relay server, achieve byte-identical convergence after
  * concurrent and offline edits.
  *
- * Prerequisites:
- *   - ws-server running on localhost:8080
- *   - A registered user (signup first if needed)
- *   - A workspace with at least one file
+ * Auth Model:
+ *   - Cookie-based authentication (syncspace_access, syncspace_csrf)
+ *   - Mutating HTTP calls use X-CSRF-Token header
+ *   - WebSocket connection uses single-use ticket (/api/ws-ticket)
  *
  * Usage:
  *   node verify-crdt.mjs
@@ -26,47 +26,81 @@ const API_BASE = 'http://localhost:8080';
 const MSG_SYNC = 0;
 const MSG_AWARENESS = 1;
 
-// ── Helpers ──────────────────────────────────────────────
+// ── Cookie Jar Helper ────────────────────────────────────
 
-async function signup(username, password) {
+class CookieJar {
+  constructor() { this.cookies = {}; }
+  parseSetCookies(headers) {
+    const raw = headers.getSetCookie?.() || [];
+    for (const h of raw) {
+      const [kv] = h.split(';');
+      const [k, ...rest] = kv.split('=');
+      const val = rest.join('=').trim();
+      if (h.includes('Max-Age=0') || h.includes('Max-Age=-1')) {
+        delete this.cookies[k.trim()];
+      } else {
+        this.cookies[k.trim()] = val;
+      }
+    }
+  }
+  get(name) { return this.cookies[name] || null; }
+  toString() { return Object.entries(this.cookies).map(([k, v]) => `${k}=${v}`).join('; '); }
+}
+
+// ── API Helpers ──────────────────────────────────────────
+
+async function signup(jar, username, password) {
   const res = await fetch(`${API_BASE}/api/auth/signup`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, email: `${username}@test.com`, password }),
   });
+  jar.parseSetCookies(res.headers);
   return res.json();
 }
 
-async function login(email, password) {
+async function login(jar, email, password) {
   const res = await fetch(`${API_BASE}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password }),
   });
+  jar.parseSetCookies(res.headers);
   return res.json();
 }
 
-async function getTicket(token) {
-  const res = await fetch(`${API_BASE}/api/ws-ticket`, {
+async function getTicket(jar, baseUrl = API_BASE) {
+  const res = await fetch(`${baseUrl}/api/ws-ticket`, {
     method: 'POST',
-    headers: { 'Authorization': `Bearer ${token}` },
+    headers: {
+      'Cookie': jar.toString(),
+      'X-CSRF-Token': jar.get('syncspace_csrf') || '',
+    },
   });
   return res.json();
 }
 
-async function createWorkspace(token, name) {
+async function createWorkspace(jar, name) {
   const res = await fetch(`${API_BASE}/api/workspaces`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+    headers: {
+      'Content-Type': 'application/json',
+      'Cookie': jar.toString(),
+      'X-CSRF-Token': jar.get('syncspace_csrf') || '',
+    },
     body: JSON.stringify({ name, description: 'CRDT test', template: 'blank', language: 'python' }),
   });
   return res.json();
 }
 
-async function createFile(token, slug, path) {
+async function createFile(jar, slug, path) {
   const res = await fetch(`${API_BASE}/api/workspaces/${slug}/file`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+    headers: {
+      'Content-Type': 'application/json',
+      'Cookie': jar.toString(),
+      'X-CSRF-Token': jar.get('syncspace_csrf') || '',
+    },
     body: JSON.stringify({ path }),
   });
   return res.json();
@@ -107,9 +141,9 @@ function createClient(name) {
     ws.send(encoding.toUint8Array(encoder));
   });
 
-  async function connect(token, slug, filePath) {
-    const { ticket } = await getTicket(token);
-    const wsUrl = `ws://localhost:8080/ws/${slug}/${encodeURIComponent(filePath)}?ticket=${ticket}`;
+  async function connect(jar, slug, filePath, port = 8080) {
+    const { ticket } = await getTicket(jar, `http://localhost:${port}`);
+    const wsUrl = `ws://localhost:${port}/ws/${slug}/${encodeURIComponent(filePath)}?ticket=${ticket}`;
     console.log(`  [${name}] Connecting to ${wsUrl.replace(/ticket=.*/, 'ticket=<REDACTED>')}`);
 
     return new Promise((resolve, reject) => {
@@ -201,26 +235,21 @@ async function main() {
   console.log(' CRDT CONVERGENCE VERIFICATION');
   console.log('═══════════════════════════════════════\n');
 
-  // Step 1: Setup — create user and workspace
-  console.log('STEP 1: Setup');
+  // Step 1: Setup — create user and workspace with cookie auth
+  console.log('STEP 1: Setup (Cookie + CSRF Auth)');
+  const jar = new CookieJar();
   const testId = `crdt_${Date.now()}`;
 
-  const signupRes = await signup(`user_${testId}`, 'TestPass123!');
-  let token;
-  if (signupRes.token) {
-    token = signupRes.token;
-  } else {
-    // User might already exist
-    const loginRes = await login(`user_${testId}@test.com`, 'TestPass123!');
-    token = loginRes.token;
-  }
-  console.log(`  Token obtained: ${token ? token.substring(0, 20) + '...' : 'FAILED'}`);
+  const signupRes = await signup(jar, `user_${testId}`, 'TestPass123!');
+  console.log(`  User signed up: ${signupRes.user?.username || 'FAILED'}`);
+  console.log(`  Cookie auth active: ${jar.get('syncspace_access') ? '✅ YES' : '❌ NO'}`);
+  console.log(`  CSRF cookie set: ${jar.get('syncspace_csrf') ? '✅ YES' : '❌ NO'}`);
 
-  const wsRes = await createWorkspace(token, `test-${testId}`);
+  const wsRes = await createWorkspace(jar, `test-${testId}`);
   const slug = wsRes.slug;
   console.log(`  Workspace created: ${slug}`);
 
-  await createFile(token, slug, 'test.py');
+  await createFile(jar, slug, 'test.py');
   console.log(`  File created: test.py`);
 
   // Step 2: Connect two clients to the same file
@@ -228,10 +257,10 @@ async function main() {
   const clientA = createClient('Alice');
   const clientB = createClient('Bob');
 
-  await clientA.connect(token, slug, 'test.py');
+  await clientA.connect(jar, slug, 'test.py');
   console.log('  Alice connected');
   await sleep(500);
-  await clientB.connect(token, slug, 'test.py');
+  await clientB.connect(jar, slug, 'test.py');
   console.log('  Bob connected');
   await sleep(1000); // Let sync handshake complete
 
@@ -273,10 +302,9 @@ async function main() {
 
   await sleep(1000);
   console.log('  Reconnecting Alice...');
-  await clientA.connect(token, slug, 'test.py');
+  await clientA.connect(jar, slug, 'test.py');
 
-  // Wait for full bidirectional sync (Alice sends her offline state vector,
-  // Bob receives it and sends back a diff, then Alice's diff needs to reach Bob)
+  // Wait for full bidirectional sync
   await sleep(5000);
 
   const textA2 = clientA.getText().toString();
@@ -290,18 +318,21 @@ async function main() {
 
   const test2Pass = textA2 === textB2 && textA2.includes('OFFLINE_EDIT_A') && textA2.includes('ONLINE_EDIT_B');
 
-  // Step 5: Verify WS URL has no JWT
+  // Step 5: Verify WS URL has no JWT / uses single-use ticket
   console.log('\n\nSTEP 5: WS Auth verification');
-  const { ticket } = await getTicket(token);
+  const { ticket } = await getTicket(jar);
   const wsUrl = `ws://localhost:8080/ws/${slug}/${encodeURIComponent('test.py')}?ticket=${ticket}`;
-  console.log(`  WS URL: ${wsUrl}`);
-  console.log(`  Contains JWT: ${wsUrl.includes(token) ? '❌ YES — VULNERABILITY' : '✅ NO'}`);
+  const accessToken = jar.get('syncspace_access');
+  console.log(`  WS URL: ${wsUrl.replace(/ticket=.*/, 'ticket=<REDACTED>')}`);
+  console.log(`  Contains JWT: ${accessToken && wsUrl.includes(accessToken) ? '❌ YES — VULNERABILITY' : '✅ NO'}`);
   console.log(`  Uses ticket: ${wsUrl.includes('ticket=') ? '✅ YES' : '❌ NO'}`);
-  console.log(`  Ticket is UUID (not JWT): ${ticket.length < 50 ? '✅ YES' : '❌ NO — too long, might be JWT'}`);
+  console.log(`  Ticket is UUID (not JWT): ${ticket && ticket.length < 50 ? '✅ YES' : '❌ NO — too long, might be JWT'}`);
+
+  const test3Pass = !wsUrl.includes(accessToken) && wsUrl.includes('ticket=') && ticket.length < 50;
 
   // Step 6: Verify ticket is single-use
   console.log('\n\nSTEP 6: Ticket single-use verification');
-  const { ticket: ticket2 } = await getTicket(token);
+  const { ticket: ticket2 } = await getTicket(jar);
   // Use the ticket once
   const ws1 = new WebSocket(`ws://localhost:8080/ws/${slug}/${encodeURIComponent('test.py')}?ticket=${ticket2}`);
   await new Promise(r => { ws1.on('open', r); ws1.on('error', r); });
@@ -320,6 +351,8 @@ async function main() {
   console.log(`  Second use (reuse): ${reuse}`);
   console.log(`  Single-use enforced: ${reuse !== 'accepted' ? '✅ YES' : '❌ NO'}`);
 
+  const test4Pass = reuse !== 'accepted';
+
   // Cleanup step 6
   clientA.disconnect();
   clientB.disconnect();
@@ -331,10 +364,10 @@ async function main() {
   const clientC = createClient('Charlie');
   const clientD = createClient('Diana');
 
-  await createFile(token, slug, 'race.py');
-  await clientC.connect(token, slug, 'race.py');
+  await createFile(jar, slug, 'race.py');
+  await clientC.connect(jar, slug, 'race.py');
   await sleep(500);
-  await clientD.connect(token, slug, 'race.py');
+  await clientD.connect(jar, slug, 'race.py');
   await sleep(1000);
 
   // Seed content via Charlie
@@ -347,9 +380,6 @@ async function main() {
   console.log(`  Diana:   "${seedD}"`);
   console.log(`  Seed synced: ${seedC === seedD && seedC === 'AAABBBCCC' ? '✅ YES' : '❌ NO'}`);
 
-  // Now: Charlie DELETES the middle "BBB" (pos 3, len 3)
-  //       Diana INSERTS "XXX" inside "BBB" (at pos 4, i.e., between first B and second B)
-  // This is the case that breaks naive CRDT: does the insert survive inside a deleted range?
   console.log('  Charlie deletes "BBB" (pos=3, len=3)');
   console.log('  Diana inserts "XXX" at pos=4 (inside the BBB range)');
 
@@ -364,7 +394,6 @@ async function main() {
   console.log(`\n  Charlie's doc: "${raceC}"`);
   console.log(`  Diana's doc:   "${raceD}"`);
   console.log(`  Byte-identical: ${raceC === raceD ? '✅ YES' : '❌ NO'}`);
-  // Yjs documented behavior: insert survives even inside a concurrently deleted range
   console.log(`  Insert "XXX" survived: ${raceC.includes('XXX') ? '✅ YES (Yjs insert-wins)' : '❌ NO'}`);
   console.log(`  "BBB" was deleted: ${!raceC.includes('BBB') ? '✅ YES' : '❌ NO (BBB still present)'}`);
   console.log(`  Contains "AAA": ${raceC.includes('AAA') ? '✅ YES' : '❌ NO'}`);
@@ -378,8 +407,6 @@ async function main() {
   // ─── STEP 8: Large file sync (message size limit) ──────
   console.log('\n\nSTEP 8: Large file sync (proves message size limit > 64KB)');
 
-  // Generate a file larger than the old 64KB limit
-  const largeContent = '// Line ' + 'X'.repeat(100) + '\n';
   const lines = 1000; // ~100KB
   let bigText = '';
   for (let i = 0; i < lines; i++) {
@@ -387,9 +414,9 @@ async function main() {
   }
   console.log(`  Generated content size: ${bigText.length} bytes (${(bigText.length / 1024).toFixed(1)}KB)`);
 
-  await createFile(token, slug, 'large.py');
+  await createFile(jar, slug, 'large.py');
   const clientE = createClient('Eve');
-  await clientE.connect(token, slug, 'large.py');
+  await clientE.connect(jar, slug, 'large.py');
   await sleep(500);
 
   // Insert the large content
@@ -398,7 +425,7 @@ async function main() {
 
   // Connect a second client to receive the large sync-step-2
   const clientF = createClient('Frank');
-  await clientF.connect(token, slug, 'large.py');
+  await clientF.connect(jar, slug, 'large.py');
   await sleep(3000); // Must receive the full sync
 
   const bigTextE = clientE.getText().toString();
@@ -417,35 +444,30 @@ async function main() {
   // ─── STEP 9: File-switch cleanup (WS leak check) ──────
   console.log('\n\nSTEP 9: File-switch cleanup (connection leak test)');
 
-  // Create 5 files
   const switchFiles = [];
   for (let i = 0; i < 5; i++) {
-    await createFile(token, slug, `switch_${i}.py`);
+    await createFile(jar, slug, `switch_${i}.py`);
     switchFiles.push(`switch_${i}.py`);
   }
 
   const clientG = createClient('Grace');
 
-  // Rapidly switch between files — simulates what the UI does
+  // Rapidly switch between files
   for (const f of switchFiles) {
-    await clientG.connect(token, slug, f);
+    await clientG.connect(jar, slug, f);
     clientG.insertAt(0, `edited_${f}\n`);
     await sleep(300);
     clientG.disconnect();
   }
 
   // After all switches, connect to the last file
-  await clientG.connect(token, slug, switchFiles[4]);
+  await clientG.connect(jar, slug, switchFiles[4]);
   await sleep(1000);
 
   const switchText = clientG.getText().toString();
   console.log(`  Last file content: "${switchText.trim()}"`);
   console.log(`  Last file has content: ${switchText.includes('switch_4') ? '✅ YES' : '❌ NO'}`);
-
-  // The key metric: there should only be 1 active connection now
   console.log(`  Client is connected: ${clientG.connected ? '✅ YES' : '❌ NO'}`);
-  console.log(`  (Frontend SyncProvider.destroy() ensures old WS is closed and Y.Doc`);
-  console.log(`   is destroyed before creating a new one on each file switch)`);
 
   const test7Pass = switchText.includes('switch_4') && clientG.connected;
   clientG.disconnect();
@@ -453,7 +475,6 @@ async function main() {
   // ─── STEP 10: Cross-instance Redis sync ────────────────
   console.log('\n\nSTEP 10: Cross-instance Redis pub/sub');
 
-  // Check if a second instance is available on port 8082
   let test8Pass = false;
   let test8Skipped = false;
   try {
@@ -465,14 +486,10 @@ async function main() {
 
     // Test cross-instance ticket: issue on 8080, consume on 8082
     console.log('\n  Cross-instance ticket test:');
-    const crossTicketRes = await fetch('http://localhost:8080/api/ws-ticket', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}` },
-    });
-    const { ticket: crossTicket } = await crossTicketRes.json();
+    const crossTicketRes = await getTicket(jar, 'http://localhost:8080');
+    const crossTicket = crossTicketRes.ticket;
     console.log(`    Ticket issued on instance 1 (8080): ${crossTicket.substring(0, 8)}...`);
 
-    // Now try to use this ticket to connect to instance 2 (8082)
     const crossTicketWsUrl = `ws://localhost:8082/ws/${slug}/${encodeURIComponent('test.py')}?ticket=${crossTicket}`;
     const crossTicketResult = await new Promise((resolve) => {
       const ws = new WebSocket(crossTicketWsUrl);
@@ -485,17 +502,15 @@ async function main() {
     const crossTicketPass = crossTicketResult === 'accepted';
     console.log(`    Cross-instance ticket: ${crossTicketPass ? '✅ PASS' : '❌ FAIL'}`);
 
-    // Create fresh workspace + file on instance 1
-    const crossSlug = slug; // Reuse workspace
-    await createFile(token, crossSlug, 'cross.py');
+    const crossSlug = slug;
+    await createFile(jar, crossSlug, 'cross.py');
 
     // Client H on instance 1
     const clientH = createClient('Heidi');
-    const ticketH = await getTicket(token);
+    const ticketH = await getTicket(jar, 'http://localhost:8080');
     const wsUrlH = `ws://localhost:8080/ws/${crossSlug}/${encodeURIComponent('cross.py')}?ticket=${ticketH.ticket}`;
     console.log(`  Heidi connecting to instance 1 (port 8080)`);
 
-    // Override connect to use specific port
     await new Promise((resolve, reject) => {
       const ws = new WebSocket(wsUrlH);
       ws.binaryType = 'arraybuffer';
@@ -514,7 +529,6 @@ async function main() {
         resolve();
       });
 
-      // Wire update handler
       clientH.doc.on('update', (update, origin) => {
         if (origin === 'remote') return;
         if (ws.readyState !== WebSocket.OPEN) return;
@@ -542,9 +556,7 @@ async function main() {
     await sleep(500);
 
     // Client I on instance 2 (port 8082)
-    const ticketI = await (await fetch('http://localhost:8082/api/ws-ticket', {
-      method: 'POST', headers: { 'Authorization': `Bearer ${token}` },
-    })).json();
+    const ticketI = await getTicket(jar, 'http://localhost:8082');
     const wsUrlI = `ws://localhost:8082/ws/${crossSlug}/${encodeURIComponent('cross.py')}?ticket=${ticketI.ticket}`;
     console.log(`  Ivan connecting to instance 2 (port 8082)`);
 
@@ -609,7 +621,7 @@ async function main() {
     console.log(`  Contains Heidi's text: ${crossH.includes('HEIDI_ON_INSTANCE_1') ? '✅ YES' : '❌ NO'}`);
     console.log(`  Contains Ivan's text: ${crossH.includes('IVAN_ON_INSTANCE_2') ? '✅ YES' : '❌ NO'}`);
 
-    test8Pass = crossH === crossI && crossH.includes('HEIDI_ON_INSTANCE_1') && crossH.includes('IVAN_ON_INSTANCE_2');
+    test8Pass = crossH === crossI && crossH.includes('HEIDI_ON_INSTANCE_1') && crossH.includes('IVAN_ON_INSTANCE_2') && crossTicketPass;
 
     clientH.doc.__ws?.close();
     clientI.doc.__ws?.close();
@@ -625,15 +637,15 @@ async function main() {
   console.log('═══════════════════════════════════════');
   console.log(`  Test 1 (concurrent inserts converge): ${test1Pass ? '✅ PASS' : '❌ FAIL'}`);
   console.log(`  Test 2 (offline/reconnect converge):  ${test2Pass ? '✅ PASS' : '❌ FAIL'}`);
-  console.log(`  Test 3 (no JWT in WS URL):            ${!wsUrl.includes(token) ? '✅ PASS' : '❌ FAIL'}`);
-  console.log(`  Test 4 (ticket single-use):           ${reuse !== 'accepted' ? '✅ PASS' : '❌ FAIL'}`);
+  console.log(`  Test 3 (no JWT in WS URL):            ${test3Pass ? '✅ PASS' : '❌ FAIL'}`);
+  console.log(`  Test 4 (ticket single-use):           ${test4Pass ? '✅ PASS' : '❌ FAIL'}`);
   console.log(`  Test 5 (insert-vs-delete race):       ${test5Pass ? '✅ PASS' : '❌ FAIL'}`);
   console.log(`  Test 6 (large file >64KB sync):       ${test6Pass ? '✅ PASS' : '❌ FAIL'}`);
   console.log(`  Test 7 (file-switch cleanup):         ${test7Pass ? '✅ PASS' : '❌ FAIL'}`);
   console.log(`  Test 8 (Redis cross-instance):        ${test8Skipped ? '⏭️  SKIPPED (no instance 2)' : test8Pass ? '✅ PASS' : '❌ FAIL'}`);
   console.log('═══════════════════════════════════════\n');
 
-  const allCore = test1Pass && test2Pass && test5Pass && test6Pass && test7Pass;
+  const allCore = test1Pass && test2Pass && test3Pass && test4Pass && test5Pass && test6Pass && test7Pass;
   process.exit(allCore ? 0 : 1);
 }
 

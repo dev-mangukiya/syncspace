@@ -1,17 +1,62 @@
 /**
- * Flush-on-Tab-Close Test — Direct verification
- * Uses a longer wait after typing to ensure y-monaco binding propagates
- * the edit to the Y.Doc before closing the tab.
+ * Flush-on-Tab-Close Test (Beacon Persist)
+ * ─────────────────────────────────────────
+ * Verifies that when a tab is closed before the 3-second auto-save debounce
+ * fires, the beforeunload/pagehide handler issues a keepalive fetch (beacon persist)
+ * with the latest editor content and valid CSRF token, so that edits are never lost.
+ *
+ * Auth Model:
+ *   - Cookie-based authentication (syncspace_access, syncspace_csrf)
+ *   - CSRF token included in beacon persist request
+ *
+ * Usage:
+ *   node verify-unload.mjs
  */
 
 import { chromium } from '@playwright/test';
 
-const APP_URL = 'http://localhost:3000';
-const WS_URL = 'http://localhost:8080';
+const APP_URL = process.env.APP_URL || 'http://localhost:3000';
+const WS_URL  = process.env.WS_URL  || 'http://localhost:8080';
+
+// ── Cookie Jar Helper ────────────────────────────────────
+
+class CookieJar {
+  constructor() { this.cookies = {}; }
+  parseSetCookies(headers) {
+    const raw = headers.getSetCookie?.() || [];
+    for (const h of raw) {
+      const [kv] = h.split(';');
+      const [k, ...rest] = kv.split('=');
+      const val = rest.join('=').trim();
+      if (h.includes('Max-Age=0') || h.includes('Max-Age=-1')) {
+        delete this.cookies[k.trim()];
+      } else {
+        this.cookies[k.trim()] = val;
+      }
+    }
+  }
+  get(name) { return this.cookies[name] || null; }
+  toString() { return Object.entries(this.cookies).map(([k, v]) => `${k}=${v}`).join('; '); }
+}
+
+async function req(method, endpoint, body, jar, extraHeaders = {}) {
+  const headers = { 'Content-Type': 'application/json', ...extraHeaders };
+  if (jar) headers['Cookie'] = jar.toString();
+  const resp = await fetch(`${APP_URL}${endpoint}`, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (jar) jar.parseSetCookies(resp.headers);
+  let data = null;
+  const text = await resp.text();
+  try { data = JSON.parse(text); } catch { data = text; }
+  return { status: resp.status, data };
+}
 
 async function main() {
   console.log('═══════════════════════════════════════');
-  console.log(' FLUSH ON TAB CLOSE TEST');
+  console.log(' FLUSH ON TAB CLOSE TEST (BEACON PERSIST)');
   console.log('═══════════════════════════════════════\n');
 
   const browser = await chromium.launch({
@@ -23,56 +68,71 @@ async function main() {
   try {
     const testId = Date.now();
 
-    // Step 1: Create user, workspace, file
-    console.log('Step 1: Setup via API...');
-    const signupRes = await fetch(`${WS_URL}/api/auth/signup`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        username: `unload2_${testId}`,
-        email: `unload2_${testId}@test.com`,
-        password: 'TestPass123!',
-      }),
-    });
-    const { token } = await signupRes.json();
+    // Step 1: Setup via Cookie Auth
+    console.log('Step 1: Setup via API (Cookie Auth)...');
+    const jar = new CookieJar();
+    const signup = await req('POST', '/api/auth/signup', {
+      username: `unload_${testId}`,
+      email: `unload_${testId}@test.com`,
+      password: 'TestPass123!',
+    }, jar);
 
-    const wsRes = await fetch(`${WS_URL}/api/workspaces`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({ name: `Unload2-${testId}` }),
-    });
-    const workspace = await wsRes.json();
-    const slug = workspace.slug;
+    if (signup.status !== 201) {
+      throw new Error(`Signup failed: ${JSON.stringify(signup.data)}`);
+    }
+
+    const csrf = jar.get('syncspace_csrf');
+    const ws = await req('POST', '/api/workspaces', {
+      name: `Unload-${testId}`,
+      language: 'python',
+      template: 'blank',
+    }, jar, { 'X-CSRF-Token': csrf });
+
+    if (ws.status !== 201) {
+      throw new Error(`Workspace creation failed: ${JSON.stringify(ws.data)}`);
+    }
+
+    const shortId = ws.data.short_id;
+    const slug = ws.data.slug;
 
     const initialContent = 'LINE_A = 1\nLINE_B = 2\nLINE_C = 3';
-    await fetch(`${WS_URL}/api/workspaces/${slug}/file`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({ path: 'beacon.py', content: initialContent }),
-    });
+    await req('POST', `/api/workspaces/${shortId}/file`, {
+      path: 'beacon.py',
+      content: initialContent,
+    }, jar, { 'X-CSRF-Token': csrf });
 
-    console.log(`  Workspace: ${slug}`);
+    console.log(`  Workspace: ${shortId} (${slug})`);
     console.log(`  Initial: "${initialContent}"`);
 
-    // Step 2: Open browser
+    // Step 2: Open browser with cookies
     console.log('\nStep 2: Opening browser...');
     const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
-    const page = await context.newPage();
+    const cookiesToAdd = Object.entries(jar.cookies).map(([name, value]) => ({
+      name,
+      value,
+      domain: 'localhost',
+      path: '/',
+      httpOnly: name.includes('access') || name.includes('refresh'),
+      sameSite: 'Lax',
+    }));
+    await context.addCookies(cookiesToAdd);
 
-    await page.goto(APP_URL);
-    await page.evaluate((t) => localStorage.setItem('syncspace_token', t), token);
-    await page.goto(`${APP_URL}/workspace/${slug}`);
+    const page = await context.newPage();
+    await page.goto(`${APP_URL}/w/${shortId}`, { waitUntil: 'networkidle' });
     await page.waitForTimeout(3000);
 
     // Select file
     console.log('  Selecting beacon.py...');
     try {
-      await page.locator('text=beacon.py').first().click({ timeout: 5000 });
-      console.log('  File selected');
+      const fileLoc = page.locator('text=beacon.py').first();
+      if (await fileLoc.isVisible({ timeout: 5000 })) {
+        await fileLoc.click();
+        console.log('  File selected');
+      }
     } catch {
       console.log('  ⚠️ Could not click beacon.py');
     }
-    await page.waitForTimeout(3000); // Wait for sync + Y.Doc to seed
+    await page.waitForTimeout(3000); // Wait for sync + editor mount
 
     // Verify editor shows the file content
     const editorContent = await page.evaluate(() => {
@@ -85,72 +145,50 @@ async function main() {
     const MARKER = `BEACON_SAVED_${testId}`;
     console.log(`\nStep 3: Typing: "${MARKER}"...`);
 
-    try {
-      const ed = page.locator('.monaco-editor .view-lines').first();
-      if (await ed.isVisible({ timeout: 5000 })) {
-        await ed.click();
-        await page.keyboard.press('Meta+End');
-        await page.keyboard.press('End');
-        await page.keyboard.press('Enter');
-        await page.keyboard.type(MARKER, { delay: 30 });
-        console.log('  Typed successfully');
-      }
-    } catch (e) {
-      console.log(`  ⚠️ Error: ${e.message}`);
-    }
+    const ed = page.locator('.monaco-editor .view-lines').first();
+    await ed.click({ timeout: 5000 });
+    await page.keyboard.press('Meta+End');
+    await page.keyboard.press('End');
+    await page.keyboard.press('Enter');
+    await page.keyboard.type(MARKER, { delay: 30 });
+    console.log('  Typed successfully');
 
-    // Wait 1s for y-monaco to propagate the edit to Y.Doc
-    // This is LESS than the 3s debounce, so the normal save timer won't fire
+    // Wait 1s for Monaco to propagate to Y.Doc
+    // (Less than 3s debounce, so normal periodic save timer will NOT fire yet)
     await page.waitForTimeout(1000);
 
-    // Verify Y.Doc has the edit
-    const yDocContent = await page.evaluate(() => {
-      // Access the sync provider through the window
-      return window.__syncDebug?.getText?.() || 'NO_DEBUG_ACCESS';
-    });
-    console.log(`  Y.Doc content: "${typeof yDocContent === 'string' ? yDocContent.substring(0, 100) : yDocContent}"`);
-
-    // Step 4: Close tab IMMEDIATELY (1s < 3s debounce)
+    // Step 4: Close tab IMMEDIATELY with runBeforeUnload: true
     console.log('\nStep 4: Closing tab (1s after edit, before 3s debounce)...');
-    
-    // Try using page.close with runBeforeUnload option
     await page.close({ runBeforeUnload: true });
     console.log('  Tab closed with runBeforeUnload: true');
 
-    // Wait for keepalive fetch
+    // Wait for keepalive beacon-persist request to finish in backend
     await new Promise(r => setTimeout(r, 3000));
 
-    // Step 5: Check content
-    console.log('\nStep 5: Fetching saved content...');
-    const fileRes = await fetch(`${WS_URL}/api/workspaces/${slug}/file?path=beacon.py`, {
-      headers: { 'Authorization': `Bearer ${token}` },
-    });
-    const file = await fileRes.json();
-    const savedContent = file.content;
+    // Step 5: Check content via backend API
+    console.log('\nStep 5: Fetching saved content from API...');
+    const fileRes = await req('GET', `/api/workspaces/${shortId}/file?path=beacon.py`, null, jar);
+    const savedContent = fileRes.data?.content || '';
 
     console.log(`\n  BEFORE: "${initialContent}"`);
     console.log(`  AFTER:  "${savedContent}"`);
-    
+
     const saved = savedContent.includes(MARKER);
     console.log(`  Contains MARKER: ${saved ? '✅ YES' : '❌ NO'}`);
 
     if (saved) {
-      console.log('\n  ✅ PASS — keepalive fetch saved the edit on tab close');
+      console.log('\n  ✅ PASS — keepalive beacon fetch saved the edit on tab close');
     } else {
-      console.log('\n  ❌ FAIL — edit lost (checking if debounce might have fired)');
-      
-      // Check if it was the debounce or the beacon
-      // If content changed but doesn't have the marker, something else saved
-      if (savedContent !== initialContent) {
-        console.log(`  Content DID change, but marker missing`);
-      }
+      console.log('\n  ❌ FAIL — edit lost on tab close');
     }
 
     await context.close();
 
     console.log('\n═══════════════════════════════════════');
-    console.log(' DONE');
+    console.log(` RESULTS: ${saved ? '1 passed, 0 failed' : '0 passed, 1 failed'}`);
     console.log('═══════════════════════════════════════\n');
+
+    process.exit(saved ? 0 : 1);
 
   } finally {
     await browser.close();

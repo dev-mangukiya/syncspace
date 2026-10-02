@@ -104,7 +104,7 @@ async function run() {
   await page.goto(`${BASE}/w/${shortId}`, { waitUntil: 'networkidle' });
   await page.waitForTimeout(1500);
 
-  const footer = page.locator('footer');
+  const footer = page.locator('#workspace-status-bar, footer').first();
   let footerText = await footer.innerText();
   console.log(`  Footer with WS server running: "${footerText.replace(/\n/g, ' | ')}"`);
   assert('Status bar shows "Synced" when WS server is healthy', footerText.includes('Synced'));
@@ -152,9 +152,13 @@ async function run() {
 
   // Test 3: Stop WS server & test sync status honesty
   console.log('4. SYNC STATUS HONESTY UNDER REAL FAILURE');
-  console.log('  Stopping WS server (pkill -f bin/ws-server)...');
-  try { execSync('pkill -f "bin/ws-server"'); } catch {}
-  await page.waitForTimeout(800);
+  console.log('  Stopping WS server...');
+  try {
+    execSync('docker stop -t 0 syncspace-ws-server');
+  } catch {
+    try { execSync('pkill -f "ws-server"'); } catch {}
+  }
+  await page.waitForTimeout(1000);
 
   // Sample footer status over 2.5 seconds (way past the 400ms solitary fallback!)
   console.log('  Sampling status bar over 2500ms with WS server DOWN...');
@@ -181,25 +185,12 @@ async function run() {
 
   // Test 4: Restart WS server & observe recovery
   console.log('5. RECOVERY VERIFICATION: Restart WS server');
-  console.log('  Restarting ws-server binary on :8080...');
-  const wsProc = spawn('./bin/ws-server', [], {
-    cwd: '/Users/devmangukiya/.gemini/antigravity-ide/scratch/syncspace/ws-server',
-    env: {
-      ...process.env,
-      CORS_ORIGIN: 'http://localhost:3000',
-      POSTGRES_HOST: 'localhost',
-      POSTGRES_PORT: '5432',
-      POSTGRES_USER: 'syncspace',
-      POSTGRES_PASSWORD: 'syncspace_dev',
-      POSTGRES_DB: 'syncspace',
-      JWT_SECRET: 'dev-jwt-secret-change-in-production',
-      PORT: '8080',
-      REDIS_URL: 'redis://localhost:6379',
-    },
-    detached: true,
-    stdio: 'ignore',
-  });
-  wsProc.unref();
+  console.log('  Restarting ws-server on :8080...');
+  try {
+    execSync('docker start syncspace-ws-server');
+  } catch {
+    try { execSync('docker compose up -d ws-server'); } catch {}
+  }
   await page.waitForTimeout(2000);
 
   // Wait for reconnect (provider reconnects every 2000ms)

@@ -64,6 +64,14 @@ async function main() {
   const ts = Date.now();
   const jar = new CookieJar();
 
+  if (process.env.GROQ_KEY_ROTATED !== 'true') {
+    console.log('  ⏭️  SKIPPED: AI-dependent test skipped until Dev rotates key personally (standing rule 0)');
+    console.log('═══════════════════════════════════════════════════════════════════');
+    console.log(' RESULTS: 0 passed, 0 failed, 1 skipped');
+    console.log('═══════════════════════════════════════════════════════════════════\n');
+    process.exit(0);
+  }
+
   // 1. Authenticate user via backend
   console.log('1. Setting up authenticated user and Python workspace...');
   const signupRes = await req('POST', '/api/auth/signup', {

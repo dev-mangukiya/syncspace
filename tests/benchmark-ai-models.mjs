@@ -135,6 +135,8 @@ async function main() {
     const medianTotal = totals[Math.floor(totals.length / 2)] || 0;
     console.log(`| **${model} MEDIAN** | - | **${medianTTFT}ms** | **${medianTotal}ms** | - |`);
   }
+  console.log('\n--- JSON OUTPUT ---');
+  console.log(JSON.stringify(results, null, 2));
 }
 
 main().catch(console.error);

@@ -132,7 +132,7 @@ async function run() {
   console.log('3. STATUS BAR VERIFICATION');
   console.log(`  Current page URL: ${page.url()}`);
   
-  const footer = page.locator('footer');
+  const footer = page.locator('#workspace-status-bar, footer').first();
   if (await footer.isVisible()) {
     console.log(`  Found footer text: "${(await footer.innerText()).replace(/\n/g, ' | ')}"`);
   } else {

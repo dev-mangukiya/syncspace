@@ -5,18 +5,53 @@
  * types in Tab A, and asserts that Tab B's Monaco model contains
  * the typed text within a few seconds — without any refresh.
  *
- * This is the test that catches the real product bug: if the y-monaco
- * MonacoBinding never loads, edits don't propagate between tabs even
- * though the protocol-level Node tests pass.
+ * Auth Model:
+ *   - Cookie-based authentication (syncspace_access, syncspace_csrf)
+ *   - Navigation to /w/{shortId} with session cookies
  *
- * Usage: node verify-live-sync.mjs [--port 3000] [--api 8080]
+ * Usage: node verify-live-sync.mjs
  */
 
 import { chromium } from '@playwright/test';
 
-const APP_URL  = process.env.APP_URL  || 'http://localhost:3000';
-const WS_URL   = process.env.WS_URL   || 'http://localhost:8080';
-const TIMEOUT  = 15_000;
+const APP_URL = process.env.APP_URL || 'http://localhost:3000';
+const WS_URL  = process.env.WS_URL  || 'http://localhost:8080';
+
+// ── Cookie Jar Helper ────────────────────────────────────
+
+class CookieJar {
+  constructor() { this.cookies = {}; }
+  parseSetCookies(headers) {
+    const raw = headers.getSetCookie?.() || [];
+    for (const h of raw) {
+      const [kv] = h.split(';');
+      const [k, ...rest] = kv.split('=');
+      const val = rest.join('=').trim();
+      if (h.includes('Max-Age=0') || h.includes('Max-Age=-1')) {
+        delete this.cookies[k.trim()];
+      } else {
+        this.cookies[k.trim()] = val;
+      }
+    }
+  }
+  get(name) { return this.cookies[name] || null; }
+  toString() { return Object.entries(this.cookies).map(([k, v]) => `${k}=${v}`).join('; '); }
+}
+
+async function req(method, endpoint, body, jar, extraHeaders = {}) {
+  const headers = { 'Content-Type': 'application/json', ...extraHeaders };
+  if (jar) headers['Cookie'] = jar.toString();
+  const resp = await fetch(`${APP_URL}${endpoint}`, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (jar) jar.parseSetCookies(resp.headers);
+  let data = null;
+  const text = await resp.text();
+  try { data = JSON.parse(text); } catch { data = text; }
+  return { status: resp.status, data };
+}
 
 async function main() {
   console.log('═══════════════════════════════════════');
@@ -38,52 +73,59 @@ async function main() {
     const testId = Date.now();
 
     // ──── Setup: create user + workspace + file via API ────
-    console.log('Setup: creating user, workspace, file...');
-    const signupRes = await fetch(`${WS_URL}/api/auth/signup`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        username: `livesync_${testId}`,
-        email: `livesync_${testId}@test.com`,
-        password: 'TestPass123!',
-      }),
-    });
-    const { token } = await signupRes.json();
+    console.log('Setup: creating user, workspace, file via cookie auth...');
+    const jar = new CookieJar();
+    const signup = await req('POST', '/api/auth/signup', {
+      username: `livesync_${testId}`,
+      email: `livesync_${testId}@test.com`,
+      password: 'TestPass123!',
+    }, jar);
 
-    const wsRes = await fetch(`${WS_URL}/api/workspaces`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({ name: `LiveSync-${testId}` }),
-    });
-    const workspace = await wsRes.json();
-    const slug = workspace.slug;
+    if (signup.status !== 201) {
+      throw new Error(`Signup failed with status ${signup.status}: ${JSON.stringify(signup.data)}`);
+    }
 
-    await fetch(`${WS_URL}/api/workspaces/${slug}/file`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({ path: 'sync.py', content: '# Live Sync Test\nprint("hello")\n' }),
-    });
-    console.log(`  Workspace: ${slug}`);
+    const csrf = jar.get('syncspace_csrf');
+    const ws = await req('POST', '/api/workspaces', {
+      name: `LiveSync-${testId}`,
+      language: 'python',
+      template: 'blank',
+    }, jar, { 'X-CSRF-Token': csrf });
+
+    if (ws.status !== 201) {
+      throw new Error(`Workspace creation failed with status ${ws.status}: ${JSON.stringify(ws.data)}`);
+    }
+
+    const shortId = ws.data.short_id;
+    const slug = ws.data.slug;
+
+    await req('POST', `/api/workspaces/${shortId}/file`, {
+      path: 'sync.py',
+      content: '# Live Sync Test\nprint("hello")\n',
+    }, jar, { 'X-CSRF-Token': csrf });
+
+    console.log(`  Workspace short_id: ${shortId} (slug: ${slug})`);
     console.log(`  File: sync.py\n`);
 
     // ──── Open two browser contexts ────
-    console.log('Opening two browser tabs...');
+    console.log('Opening two browser tabs in isolated contexts...');
     const ctxA = await browser.newContext({ viewport: { width: 1280, height: 720 } });
     const ctxB = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+
+    // Set auth cookies on both contexts
+    const cookiesToAdd = Object.entries(jar.cookies).map(([name, value]) => ({
+      name,
+      value,
+      domain: 'localhost',
+      path: '/',
+      httpOnly: name.includes('access') || name.includes('refresh'),
+      sameSite: 'Lax',
+    }));
+    await ctxA.addCookies(cookiesToAdd);
+    await ctxB.addCookies(cookiesToAdd);
+
     const pageA = await ctxA.newPage();
     const pageB = await ctxB.newPage();
-
-    // Inject auth token
-    await pageA.goto(APP_URL);
-    await pageA.evaluate(t => localStorage.setItem('syncspace_token', t), token);
-    await pageB.goto(APP_URL);
-    await pageB.evaluate(t => localStorage.setItem('syncspace_token', t), token);
-
-    const workspaceUrl = `${APP_URL}/workspace/${slug}`;
-    await pageA.goto(workspaceUrl);
-    await pageB.goto(workspaceUrl);
-    await pageA.waitForTimeout(3000);
-    await pageB.waitForTimeout(2000);
 
     // Collect console errors from both pages
     const errorsA = [];
@@ -91,26 +133,38 @@ async function main() {
     pageA.on('pageerror', err => errorsA.push(err.message));
     pageB.on('pageerror', err => errorsB.push(err.message));
 
+    const workspaceUrl = `${APP_URL}/w/${shortId}`;
+    await Promise.all([
+      pageA.goto(workspaceUrl, { waitUntil: 'networkidle' }),
+      pageB.goto(workspaceUrl, { waitUntil: 'networkidle' }),
+    ]);
+
+    await pageA.waitForTimeout(3000);
+    await pageB.waitForTimeout(2000);
+
     // Select sync.py in both tabs
     console.log('Selecting sync.py in both tabs...');
     for (const page of [pageA, pageB]) {
       try {
-        await page.locator('text=sync.py').first().click({ timeout: 5000 });
+        const fileLocator = page.locator('text=sync.py').first();
+        if (await fileLocator.isVisible({ timeout: 4000 })) {
+          await fileLocator.click();
+        }
       } catch {}
     }
-    await pageA.waitForTimeout(3000);
+    await pageA.waitForTimeout(2000);
     await pageB.waitForTimeout(2000);
 
     // ──── TEST 1: No y-monaco import errors ────
     console.log('\n─── TEST 1: No y-monaco import errors ───');
-    const yMonacoErrors = errorsA.filter(e => e.includes('y-monaco') || e.includes('monaco-editor/esm'));
+    const yMonacoErrorsA = errorsA.filter(e => e.includes('y-monaco') || e.includes('monaco-editor/esm'));
     const yMonacoErrorsB = errorsB.filter(e => e.includes('y-monaco') || e.includes('monaco-editor/esm'));
-    if (yMonacoErrors.length === 0 && yMonacoErrorsB.length === 0) {
+    if (yMonacoErrorsA.length === 0 && yMonacoErrorsB.length === 0) {
       console.log('  ✅ PASS — No y-monaco import errors in either tab');
       passed++;
     } else {
       console.log('  ❌ FAIL — y-monaco import errors detected:');
-      yMonacoErrors.forEach(e => console.log(`    Tab A: ${e}`));
+      yMonacoErrorsA.forEach(e => console.log(`    Tab A: ${e}`));
       yMonacoErrorsB.forEach(e => console.log(`    Tab B: ${e}`));
       failed++;
     }
@@ -118,8 +172,7 @@ async function main() {
     // ──── TEST 2: Tab A → Tab B live text sync ────
     console.log('\n─── TEST 2: Type in Tab A, appears in Tab B ───');
     const MARKER_A = `SYNC_FROM_A_${testId}`;
-    
-    // Type in Tab A
+
     const editorSel = '.monaco-editor .view-lines';
     try {
       const edA = pageA.locator(editorSel).first();
@@ -134,10 +187,7 @@ async function main() {
       failed++;
     }
 
-    // Wait for sync (Y.Doc update → WS → peer Y.Doc → MonacoBinding → Monaco model)
     console.log('  Waiting for sync propagation...');
-    
-    // Poll Tab B's Monaco model for up to 10 seconds
     let syncedToB = false;
     for (let i = 0; i < 20; i++) {
       await pageB.waitForTimeout(500);
@@ -157,7 +207,6 @@ async function main() {
       passed++;
     } else {
       console.log(`  ❌ FAIL — Text from Tab A did NOT appear in Tab B after 10s`);
-      // Dump Tab B content for debugging
       const finalB = await pageB.evaluate(() => {
         const lines = document.querySelectorAll('.monaco-editor .view-line');
         return Array.from(lines).map(l => l.textContent).join('\n');
@@ -248,13 +297,12 @@ async function main() {
     } else {
       console.log('  ⚠️ INFO — No yRemoteSelectionHead elements (same user = same awareness name)');
       console.log('            Cursor rendering works but requires distinct user identities to show labels');
-      // This is informational, not a failure — it's a test infrastructure limitation
     }
 
     // ──── Screenshots ────
     console.log('\n─── Screenshots ───');
-    await pageA.screenshot({ path: 'live_sync_tab_a.png', fullPage: false });
-    await pageB.screenshot({ path: 'live_sync_tab_b.png', fullPage: false });
+    await pageA.screenshot({ path: 'tests/live_sync_tab_a.png', fullPage: false });
+    await pageB.screenshot({ path: 'tests/live_sync_tab_b.png', fullPage: false });
     console.log('  live_sync_tab_a.png saved');
     console.log('  live_sync_tab_b.png saved');
 
