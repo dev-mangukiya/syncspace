@@ -51,7 +51,7 @@ export function Logo({ size = 'md', showWordmark = true, className }: LogoProps)
         {/* Right bracket — offset to interlock */}
         <path
           d="M24 6L16 16L24 26"
-          stroke="var(--color-accent)"
+          stroke="var(--color-text)"
           strokeWidth="3"
           strokeLinecap="round"
           strokeLinejoin="round"

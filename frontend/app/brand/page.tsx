@@ -86,10 +86,9 @@ export default function BrandPage() {
                 Scale & Color Variations
               </h3>
               <p style={{ fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)', lineHeight: 1.6 }}>
-                <strong>Dark theme:</strong> Primary chevron in #F6F7F8, secondary in #3B82F6.<br/>
-                <strong>Light theme:</strong> Primary chevron in #0F172A, secondary in #2563EB.<br/>
-                <strong>Monochrome:</strong> Flat white or ink for single-color production.<br/>
-                <strong>Reversed:</strong> Accent lead with neutral follower for badge accents.
+                <strong>Theme-adaptive monochrome:</strong> Both chevrons render in <code>var(--color-text)</code> (#F6F7F8 in dark theme, #0F172A in light theme). Zero glow, zero gradients, zero pulse, and zero color tinting.<br/>
+                <strong>Print / Mono:</strong> Pure 100% ink on paper or pure white on dark media.<br/>
+                <strong>Inverted:</strong> Automatically adjusts stroke contrast with surrounding container surface.
               </p>
             </div>
           </div>
