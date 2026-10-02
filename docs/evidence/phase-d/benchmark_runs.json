@@ -1,0 +1,76 @@
+{
+  "openai/gpt-oss-120b": [
+    {
+      "model": "openai/gpt-oss-120b",
+      "ttftMs": 776,
+      "totalTimeMs": 1747,
+      "textLength": 1829,
+      "estimatedTokens": 457
+    },
+    {
+      "model": "openai/gpt-oss-120b",
+      "ttftMs": 569,
+      "totalTimeMs": 1579,
+      "textLength": 1896,
+      "estimatedTokens": 474
+    },
+    {
+      "model": "openai/gpt-oss-120b",
+      "ttftMs": 300,
+      "totalTimeMs": 1245,
+      "textLength": 1834,
+      "estimatedTokens": 459
+    },
+    {
+      "model": "openai/gpt-oss-120b",
+      "ttftMs": 713,
+      "totalTimeMs": 1617,
+      "textLength": 1703,
+      "estimatedTokens": 426
+    },
+    {
+      "model": "openai/gpt-oss-120b",
+      "ttftMs": 595,
+      "totalTimeMs": 1422,
+      "textLength": 1598,
+      "estimatedTokens": 400
+    }
+  ],
+  "openai/gpt-oss-20b": [
+    {
+      "model": "openai/gpt-oss-20b",
+      "ttftMs": 555,
+      "totalTimeMs": 922,
+      "textLength": 1259,
+      "estimatedTokens": 315
+    },
+    {
+      "model": "openai/gpt-oss-20b",
+      "ttftMs": 657,
+      "totalTimeMs": 1167,
+      "textLength": 1516,
+      "estimatedTokens": 379
+    },
+    {
+      "model": "openai/gpt-oss-20b",
+      "ttftMs": 599,
+      "totalTimeMs": 1072,
+      "textLength": 1608,
+      "estimatedTokens": 402
+    },
+    {
+      "model": "openai/gpt-oss-20b",
+      "ttftMs": 561,
+      "totalTimeMs": 943,
+      "textLength": 1201,
+      "estimatedTokens": 300
+    },
+    {
+      "model": "openai/gpt-oss-20b",
+      "ttftMs": 527,
+      "totalTimeMs": 1032,
+      "textLength": 1626,
+      "estimatedTokens": 407
+    }
+  ]
+}
