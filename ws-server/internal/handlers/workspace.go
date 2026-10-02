@@ -511,12 +511,14 @@ func (h *WorkspaceHandler) seedTemplateFiles(ws *models.Workspace) error {
 			{
 				path: "index.js",
 				content: `// Pagination and Data Slicing Module
+console.log("Hello from SyncSpace!");
+
 function paginate(items, page = 1, pageSize = 10) {
   if (page < 1 || pageSize < 1) {
     throw new RangeError("Page and pageSize must be positive integers");
   }
   const start = (page - 1) * pageSize;
-  const end = start + pageSize + 1;
+  const end = start + pageSize;
   return items.slice(start, end);
 }
 
@@ -559,11 +561,12 @@ runChecks();
 			{
 				path: "app.py",
 				content: `"""Temperature conversion utility module."""
+print("Hello from SyncSpace!")
 
 def convert_temperature(value: float, unit: str) -> float:
     unit = unit.upper()
     if unit == 'C':
-        return (value * 5 / 9) + 32
+        return (value * 9 / 5) + 32
     elif unit == 'F':
         return (value - 32) * 5 / 9
     raise ValueError(f"Unsupported unit: {unit}")
