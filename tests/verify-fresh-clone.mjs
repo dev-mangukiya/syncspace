@@ -36,12 +36,12 @@ async function main() {
   await page.waitForURL('**/dashboard', { timeout: 10000 });
   console.log(`   ✅ Signed up successfully and redirected to /dashboard`);
 
-  // 2. Create workspace
-  console.log(`3. Creating a new Python workspace...`);
+  // 2. Create workspace (default template)
+  console.log(`3. Creating a new workspace with default template...`);
   await page.click('button:has-text("New workspace")');
   await page.waitForSelector('#ws-name', { timeout: 5000 });
   await page.fill('#ws-name', `fresh-ws-${ts}`);
-  await page.selectOption('#ws-template', 'python');
+  // Leave default template (JavaScript) selected
   await page.click('button:has-text("Create")');
 
   // Wait for card to appear and click it
