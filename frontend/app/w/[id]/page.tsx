@@ -298,7 +298,7 @@ export default function WorkspacePage() {
       setSyncStatus('synced');
       const ytext = provider.getText();
       const tab = tabManager.tabState.openTabs.find(t => t.path === activePath);
-      if (ytext.length === 0 && tab?.file.content && tab.file.content.length > 0) {
+      if (provider.canSeed() && ytext.length === 0 && tab?.file.content && tab.file.content.length > 0) {
         provider.seedContent(tab.file.content);
       }
       setEditorContent(ytext.toString());

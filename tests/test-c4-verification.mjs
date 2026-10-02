@@ -166,15 +166,16 @@ async function run() {
 
   // Verify: all text was sent, Y.Doc is intact, file events arrived
   const docContent = ytext.toString();
+  const fileOpsEvents = fileEvents.filter(e => e.type !== 'seed_grant');
   assert(`Y.Doc content intact (${docContent.length} chars)`, docContent === typedChars);
-  assert('File tree events received during typing', fileEvents.length >= 4);
+  assert('File tree events received during typing', fileOpsEvents.length >= 4);
   // With a single client in the room, the relay has nobody to echo sync messages back to.
   // The key proof: file events (text frames) arrived correctly AND typing wasn't disrupted.
   // If the 0x00-prefix bug still existed, sync step 1 (which starts with 0x00) would have
   // been misrouted through the control-message path and silently dropped.
-  assert('No binary msgs misclassified as text (text event count matches file ops)', fileEvents.length === 5);
+  assert('No binary msgs misclassified as text (text event count matches file ops)', fileOpsEvents.length === 5);
   
-  console.log(`  📊 Stats: ${binaryMsgsReceived} binary msgs, ${syncMsgsReceived} sync msgs, ${fileEvents.length} file events`);
+  console.log(`  📊 Stats: ${binaryMsgsReceived} binary msgs, ${syncMsgsReceived} sync msgs, ${fileOpsEvents.length} file ops events`);
   console.log(`  📊 File events: ${fileEvents.map(e => e.type).join(', ')}`);
   console.log();
 

@@ -70,13 +70,11 @@ type StreamEvent struct {
 	Error           string `json:"error,omitempty"`
 }
 
-// Docker images for each supported language
+// Docker images for each supported language (spec requires Python and Node/TS)
 var languageImages = map[string]string{
 	"python":     "python:3.12-alpine",
 	"javascript": "node:20-alpine",
 	"typescript": "node:20-alpine",
-	"go":         "golang:1.22-alpine",
-	"ruby":       "ruby:3.3-alpine",
 }
 
 // Commands to run for each language (accept code directly via stdin)
@@ -84,8 +82,6 @@ var languageCommands = map[string][]string{
 	"python":     {"python3", "-u", "-"},
 	"javascript": {"node", "-"},
 	"typescript": {"node", "-"},
-	"go":         {"sh", "-c", "cat > /tmp/main.go && go run /tmp/main.go"},
-	"ruby":       {"ruby", "-"},
 }
 
 // File extensions for each language
@@ -93,8 +89,6 @@ var languageExtensions = map[string]string{
 	"python":     "py",
 	"javascript": "js",
 	"typescript": "js",
-	"go":         "go",
-	"ruby":       "rb",
 }
 
 // Active containers tracker for cancel operations
@@ -367,16 +361,10 @@ func main() {
 				"--cpus", cpuLimit,
 				"--pids-limit", pidsLimit,
 				"--read-only",
-				"--tmpfs", "/tmp:rw,exec,nosuid,size=64m",
+				"--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
 				"--security-opt", "no-new-privileges",
 				"--cap-drop", "ALL",
 				"--user", "65534:65534",
-			}
-
-			if req.Language == "go" {
-				args = append(args, "--tmpfs", "/go:rw,exec,size=128m")
-				args = append(args, "--tmpfs", "/root:rw,size=64m")
-				args[len(args)-3] = "0:0"
 			}
 
 			args = append(args, image)
@@ -600,16 +588,10 @@ func main() {
 				"--cpus", cpuLimit,
 				"--pids-limit", pidsLimit,
 				"--read-only",
-				"--tmpfs", "/tmp:rw,exec,nosuid,size=64m",
+				"--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
 				"--security-opt", "no-new-privileges",
 				"--cap-drop", "ALL",
 				"--user", "65534:65534",
-			}
-
-			if req.Language == "go" {
-				args = append(args, "--tmpfs", "/go:rw,exec,size=128m")
-				args = append(args, "--tmpfs", "/root:rw,size=64m")
-				args[len(args)-3] = "0:0"
 			}
 
 			args = append(args, image)

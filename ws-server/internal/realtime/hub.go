@@ -1,6 +1,9 @@
 package realtime
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -48,6 +51,8 @@ type Hub struct {
 	register   chan *Client
 	unregister chan *Client
 	Redis      *RedisRelay                    // nil if Redis not configured
+	seedMu     sync.Mutex
+	seedLocks  map[roomKey]string
 }
 
 // NewHub creates and starts a new Hub
@@ -59,6 +64,7 @@ func NewHub() *Hub {
 		colorSeq:   make(map[string]int),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
+		seedLocks:  make(map[roomKey]string),
 	}
 	go h.run()
 	return h
@@ -74,6 +80,7 @@ func (h *Hub) run() {
 			if h.rooms[rk] == nil {
 				h.rooms[rk] = make(map[*Client]bool)
 			}
+			isFirstInRoom := len(h.rooms[rk]) == 0
 			h.rooms[rk][client] = true
 
 			// Add to workspace presence
@@ -95,7 +102,24 @@ func (h *Hub) run() {
 			if wsCount == 1 && h.Redis != nil {
 				h.Redis.SubscribeWorkspace(client.Workspace, h.instanceID)
 			}
+
+			var grantSeed bool
+			if isFirstInRoom {
+				grantSeed = h.acquireSeedLock(rk, client.ID)
+			}
 			h.mu.Unlock()
+
+			if grantSeed {
+				grantPayload, _ := json.Marshal(map[string]interface{}{
+					"type": "seed_grant",
+					"file": client.FilePath,
+				})
+				select {
+				case client.SendText <- grantPayload:
+				default:
+				}
+				log.Printf("[WS] Elected %s as seeder for %s:%s", client.Username, client.Workspace, client.FilePath)
+			}
 
 			log.Printf("[WS] %s joined room %s:%s (%d in room, %d in workspace)",
 				client.Username, client.Workspace, client.FilePath, roomCount, wsCount)
@@ -110,6 +134,7 @@ func (h *Hub) run() {
 					close(client.Send)
 					if len(clients) == 0 {
 						delete(h.rooms, rk)
+						h.releaseSeedLock(rk)
 						// Unsubscribe from Redis when last local client leaves
 						if h.Redis != nil {
 							h.Redis.Unsubscribe(rk)
@@ -309,3 +334,41 @@ func (ts *memoryTicketStore) Consume(ticketID string) *Ticket {
 	}
 	return &ticket.Ticket
 }
+
+// acquireSeedLock attempts to elect clientID as the designated seeder for rk.
+// Uses Redis SET NX with 30s TTL across instances, or in-memory fallback.
+func (h *Hub) acquireSeedLock(rk roomKey, clientID string) bool {
+	if h.Redis != nil && h.Redis.Client() != nil {
+		key := fmt.Sprintf("seed:%s:%s", rk.Workspace, rk.FilePath)
+		ok, err := h.Redis.Client().SetNX(context.Background(), key, clientID, 30*time.Second).Result()
+		if err == nil && ok {
+			return true
+		}
+		return false
+	}
+
+	h.seedMu.Lock()
+	defer h.seedMu.Unlock()
+	if h.seedLocks == nil {
+		h.seedLocks = make(map[roomKey]string)
+	}
+	if holder, exists := h.seedLocks[rk]; !exists || holder == clientID {
+		h.seedLocks[rk] = clientID
+		return true
+	}
+	return false
+}
+
+func (h *Hub) releaseSeedLock(rk roomKey) {
+	if h.Redis != nil && h.Redis.Client() != nil {
+		key := fmt.Sprintf("seed:%s:%s", rk.Workspace, rk.FilePath)
+		_ = h.Redis.Client().Del(context.Background(), key).Err()
+	}
+
+	h.seedMu.Lock()
+	if h.seedLocks != nil {
+		delete(h.seedLocks, rk)
+	}
+	h.seedMu.Unlock()
+}
+

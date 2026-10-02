@@ -63,14 +63,20 @@ export class SyncProvider {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private solitarySyncTimer: ReturnType<typeof setTimeout> | null = null;
   private synced = false;
+  private hasSeedGrant = false;
 
   // Callbacks
   onSynced: (() => void) | null = null;
+  onSeedGrant: (() => void) | null = null;
   onStatus: ((status: { connected: boolean }) => void) | null = null;
   // File tree change events broadcast by the server (create, rename, delete)
   onFileTreeEvent: ((event: { type: string; path: string; new_path?: string }) => void) | null = null;
   // Real-time chat messages broadcast by the server
   onChatMessage: ((message: any) => void) | null = null;
+
+  canSeed(): boolean {
+    return this.hasSeedGrant;
+  }
 
   constructor(options: SyncProviderOptions) {
     this.options = options;
@@ -201,6 +207,11 @@ export class SyncProvider {
         if (typeof event.data === 'string') {
           try {
             const parsed = JSON.parse(event.data);
+            if (parsed.type === 'seed_grant' && parsed.file === this.options.filePath) {
+              this.hasSeedGrant = true;
+              this.onSeedGrant?.();
+              return;
+            }
             if (parsed.type === 'chat_message') {
               if (typeof window !== 'undefined') {
                 window.dispatchEvent(new CustomEvent('syncspace:chat', { detail: parsed.message }));
@@ -296,9 +307,12 @@ export class SyncProvider {
 
   /**
    * Seed the Y.Doc from existing content (e.g., from the database).
-   * Only call this when the Y.Doc is empty (first client to open the file).
+   * Only call this when the Y.Doc is empty AND this client was elected as seeder.
    */
   seedContent(content: string) {
+    if (!this.hasSeedGrant) {
+      return;
+    }
     const ytext = this.getText();
     if (ytext.length === 0 && content.length > 0) {
       this.doc.transact(() => {

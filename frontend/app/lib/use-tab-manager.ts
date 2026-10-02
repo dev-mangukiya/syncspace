@@ -70,11 +70,20 @@ export function useTabManager(opts: UseTabManagerOpts) {
         colorSlot: opts.colorSlot,
       });
 
-      provider.onSynced = () => {
-        // If Y.Doc is empty after sync, seed from DB content
+      provider.onSeedGrant = () => {
         const ytext = provider.getText();
-        if (ytext.length === 0 && file.content.length > 0) {
+        if (ytext.length === 0 && file.content && file.content.length > 0) {
           provider.seedContent(file.content);
+        }
+      };
+
+      provider.onSynced = () => {
+        // If Y.Doc is empty and this client holds the seed grant, seed from DB content
+        if (provider.canSeed()) {
+          const ytext = provider.getText();
+          if (ytext.length === 0 && file.content && file.content.length > 0) {
+            provider.seedContent(file.content);
+          }
         }
       };
 

@@ -6,6 +6,7 @@ set -e
 # ==============================================================================
 # Runs every automated test suite, captures raw per-suite results,
 # and prints per-suite counts plus grand totals.
+# PASS/FAIL is driven strictly by process exit codes.
 # ==============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,6 +33,8 @@ SUITES=(
   "tests/test-c7-chat.mjs"
   "tests/test-c7-fixes.mjs"
   "tests/test-break-sandbox.mjs"
+  "tests/test-timeout-clamp.mjs"
+  "tests/test-seeding-race.mjs"
   "tests/test-phase-d-e2e.mjs"
   "tests/test-three-state-demo.mjs"
   "tests/test-ai-plant-bug.mjs"
@@ -53,27 +56,53 @@ trap 'rm -rf "${TMP_LOG_DIR}"' EXIT
 printf "%-40s %-10s %-8s %-8s %-8s\n" "SUITE" "STATUS" "PASSED" "FAILED" "SKIPPED"
 echo "─────────────────────────────────────────────────────────────────────────────────"
 
-for SUITE in "${SUITES[@]}"; do
-  SUITE_NAME=$(basename "${SUITE}")
-  SUITE_LOG="${TMP_LOG_DIR}/${SUITE_NAME}.log"
-
-  # Run suite and capture output
-  STATUS="PASS"
-  if node "${SUITE}" > "${SUITE_LOG}" 2>&1; then
-    STATUS="PASS"
-  else
-    STATUS="FAIL"
-    FAILED_SUITES+=("${SUITE_NAME}")
-  fi
-
-  # Extract counts from results line
-  # Pattern matches: RESULTS: X passed, Y failed, Z skipped
-  # or: X passed, Y failed
-  # or: CONTAINED ✓ count
+# 1. Run Go Unit Tests
+GO_SERVICES=("ws-server" "exec-service")
+for SVC in "${GO_SERVICES[@]}"; do
+  SVC_NAME="go-test-${SVC}"
+  SVC_LOG="${TMP_LOG_DIR}/${SVC_NAME}.log"
   PASSED=0
   FAILED=0
   SKIPPED=0
 
+  if (cd "${ROOT_DIR}/${SVC}" && go test -v ./...) > "${SVC_LOG}" 2>&1; then
+    STATUS="PASS"
+    PASSED=$(grep -c -- "--- PASS:" "${SVC_LOG}" || true)
+    [ "${PASSED}" -eq 0 ] && PASSED=1
+  else
+    STATUS="FAIL"
+    FAILED=$(grep -c -- "--- FAIL:" "${SVC_LOG}" || true)
+    [ "${FAILED}" -eq 0 ] && FAILED=1
+    FAILED_SUITES+=("${SVC_NAME}")
+  fi
+
+  TOTAL_PASSED=$((TOTAL_PASSED + PASSED))
+  TOTAL_FAILED=$((TOTAL_FAILED + FAILED))
+
+  STATUS_DISP="✅ PASS"
+  if [ "${STATUS}" = "FAIL" ]; then
+    STATUS_DISP="❌ FAIL"
+  fi
+  printf "%-40s %-12b %-8d %-8d %-8d\n" "${SVC_NAME}" "${STATUS_DISP}" "${PASSED}" "${FAILED}" "${SKIPPED}"
+done
+
+# 2. Run Node.js Test Suites
+for SUITE in "${SUITES[@]}"; do
+  SUITE_NAME=$(basename "${SUITE}")
+  SUITE_LOG="${TMP_LOG_DIR}/${SUITE_NAME}.log"
+
+  PASSED=0
+  FAILED=0
+  SKIPPED=0
+
+  # Execute suite and check process exit code
+  if node "${SUITE}" > "${SUITE_LOG}" 2>&1; then
+    EXIT_CODE=0
+  else
+    EXIT_CODE=$?
+  fi
+
+  # Parse counts (informational only)
   if grep -qi "RESULTS:.*passed" "${SUITE_LOG}"; then
     RES_LINE=$(grep -i "RESULTS:" "${SUITE_LOG}" | tail -n 1)
     PASSED=$(echo "${RES_LINE}" | grep -ioE '[0-9]+ passed' | head -n 1 | awk '{print $1}')
@@ -83,7 +112,6 @@ for SUITE in "${SUITES[@]}"; do
     [ -z "${FAILED}" ] && FAILED=0
     [ -z "${SKIPPED}" ] && SKIPPED=0
   elif grep -qi "BREAK THE SANDBOX" "${SUITE_LOG}"; then
-    # Break sandbox suite uses CONTAINED count
     PASSED=$(grep -c "Result: PASS (Contained)" "${SUITE_LOG}" || true)
     FAILED=0
     SKIPPED=0
@@ -93,15 +121,16 @@ for SUITE in "${SUITES[@]}"; do
     SKIPPED=$(grep -c "⏭️" "${SUITE_LOG}" || true)
   fi
 
-  # If failed but FAILED count was 0 (unexpected crash)
-  if [ "${STATUS}" = "FAIL" ] && [ "${FAILED}" -eq 0 ]; then
-    FAILED=1
-  fi
-
-  # If suite was entirely skipped
-  if grep -qi "SKIPPED.*(standing rule" "${SUITE_LOG}" && [ "${PASSED}" -eq 0 ]; then
+  # Determine PASS / FAIL / SKIP strictly from process exit code
+  if [ "${EXIT_CODE}" -ne 0 ]; then
+    STATUS="FAIL"
+    [ "${FAILED}" -eq 0 ] && FAILED=1
+    FAILED_SUITES+=("${SUITE_NAME}")
+  elif grep -qi "SKIPPED.*(standing rule" "${SUITE_LOG}" && [ "${PASSED}" -eq 0 ]; then
     STATUS="SKIP"
     SKIPPED=1
+  else
+    STATUS="PASS"
   fi
 
   TOTAL_PASSED=$((TOTAL_PASSED + PASSED))

@@ -112,9 +112,27 @@ async function main() {
   );
   lines.slice(0, 10).forEach(l => console.log(`     > ${l}`));
 
+  const hasExitZero = terminalText.includes('Exit 0') || terminalText.includes('exit: 0') || terminalText.includes('exit code 0');
+  const hasProgramOutput = terminalText.includes('Hello from SyncSpace!');
+
+  console.log(`\n   Asserting run output:`);
+  console.log(`     Exit 0: ${hasExitZero ? '✅ YES' : '❌ NO'}`);
+  console.log(`     Program Output ("Hello from SyncSpace!"): ${hasProgramOutput ? '✅ YES' : '❌ NO'}`);
+
+  if (!hasExitZero || !hasProgramOutput) {
+    throw new Error(`Fresh clone run assertion failed: hasExitZero=${hasExitZero}, hasProgramOutput=${hasProgramOutput}`);
+  }
+
   const screenshotPath = '/Users/devmangukiya/.gemini/antigravity-ide/brain/e6dc6e37-67ed-4370-92e0-401d95603a45/fresh_clone_run_and_ai.png';
   await page.screenshot({ path: screenshotPath, fullPage: true });
   console.log(`\n6. Screenshot saved to ${screenshotPath}`);
+
+  // Copy to docs/evidence/phase-d/ as well
+  try {
+    const fs = await import('fs');
+    fs.copyFileSync(screenshotPath, 'docs/evidence/phase-d/fresh_clone_run_and_ai.png');
+    console.log(`   Screenshot copied to docs/evidence/phase-d/fresh_clone_run_and_ai.png`);
+  } catch {}
 
   await browser.close();
 

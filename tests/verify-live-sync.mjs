@@ -259,29 +259,40 @@ async function main() {
       failed++;
     }
 
-    // ──── TEST 4: Both markers visible in both tabs ────
-    console.log('\n─── TEST 4: Both markers in both tabs ───');
-    const contentA = await pageA.evaluate(() => {
-      const lines = document.querySelectorAll('.monaco-editor .view-line');
-      return Array.from(lines).map(l => l.textContent).join('\n');
+    // ──── TEST 4: Exact final text convergence & no duplication ────
+    console.log('\n─── TEST 4: Exact final text match & no duplication ───');
+    const modelTextA = await pageA.evaluate(() => {
+      const ed = (window).monaco?.editor?.getEditors?.()[0];
+      return ed ? ed.getValue() : '';
     });
-    const contentB = await pageB.evaluate(() => {
-      const lines = document.querySelectorAll('.monaco-editor .view-line');
-      return Array.from(lines).map(l => l.textContent).join('\n');
+    const modelTextB = await pageB.evaluate(() => {
+      const ed = (window).monaco?.editor?.getEditors?.()[0];
+      return ed ? ed.getValue() : '';
     });
 
-    const bothInA = contentA.includes(MARKER_A) && contentA.includes(MARKER_B);
-    const bothInB = contentB.includes(MARKER_A) && contentB.includes(MARKER_B);
+    const bothInA = modelTextA.includes(MARKER_A) && modelTextA.includes(MARKER_B);
+    const bothInB = modelTextB.includes(MARKER_A) && modelTextB.includes(MARKER_B);
+    const exactMatch = modelTextA === modelTextB;
 
-    if (bothInA && bothInB) {
-      console.log('  ✅ PASS — Both markers present in both tabs (converged)');
+    const occurrencesHeaderA = (modelTextA.match(/# Live Sync Test/g) || []).length;
+    const occurrencesHeaderB = (modelTextB.match(/# Live Sync Test/g) || []).length;
+    const occurrencesPrintA = (modelTextA.match(/print\("hello"\)/g) || []).length;
+    const occurrencesPrintB = (modelTextB.match(/print\("hello"\)/g) || []).length;
+
+    const noDuplication = occurrencesHeaderA === 1 && occurrencesHeaderB === 1 &&
+                          occurrencesPrintA === 1 && occurrencesPrintB === 1;
+
+    if (bothInA && bothInB && exactMatch && noDuplication) {
+      console.log('  ✅ PASS — Exact final text matches between Tab A and Tab B, initial content present exactly once');
       passed++;
     } else {
-      console.log('  ❌ FAIL — Not all markers present');
-      console.log(`    Tab A has A marker: ${contentA.includes(MARKER_A)}`);
-      console.log(`    Tab A has B marker: ${contentA.includes(MARKER_B)}`);
-      console.log(`    Tab B has A marker: ${contentB.includes(MARKER_A)}`);
-      console.log(`    Tab B has B marker: ${contentB.includes(MARKER_B)}`);
+      console.log('  ❌ FAIL — Text divergence or duplication detected:');
+      console.log(`    exactMatch: ${exactMatch}`);
+      console.log(`    bothInA: ${bothInA}, bothInB: ${bothInB}`);
+      console.log(`    Header occurrences (A=${occurrencesHeaderA}, B=${occurrencesHeaderB})`);
+      console.log(`    Print occurrences (A=${occurrencesPrintA}, B=${occurrencesPrintB})`);
+      console.log(`    Tab A text:\n${modelTextA}`);
+      console.log(`    Tab B text:\n${modelTextB}`);
       failed++;
     }
 
@@ -307,8 +318,8 @@ async function main() {
     console.log('  live_sync_tab_b.png saved');
 
     // Dump full content for evidence
-    console.log(`\n  Tab A final content:\n    "${contentA.replace(/\n/g, '\\n')}"`);
-    console.log(`  Tab B final content:\n    "${contentB.replace(/\n/g, '\\n')}"`);
+    console.log(`\n  Tab A final content:\n    "${modelTextA.replace(/\n/g, '\\n')}"`);
+    console.log(`  Tab B final content:\n    "${modelTextB.replace(/\n/g, '\\n')}"`);
 
     // All errors
     if (errorsA.length || errorsB.length) {
