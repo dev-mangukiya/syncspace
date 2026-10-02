@@ -146,6 +146,7 @@ type CompletionRequest struct {
 	Temperature     float64      `json:"temperature"`
 	MaxTokens       int          `json:"max_tokens"`
 	ReasoningEffort string       `json:"reasoning_effort,omitempty"`
+	ReasoningFormat string       `json:"reasoning_format,omitempty"`
 }
 
 type APIMessage struct {
@@ -257,7 +258,8 @@ func (h *AIHandler) Chat(w http.ResponseWriter, r *http.Request) {
 		Messages:        messages,
 		Temperature:     0.2, // Low temperature for high precision coding
 		MaxTokens:       4096,
-		ReasoningEffort: "low", // Keep reasoning effort low for minimal latency
+		ReasoningEffort: "low",    // Keep reasoning effort low for minimal latency
+		ReasoningFormat: "parsed", // Direct reasoning tokens to message.reasoning so message.content is purely clean output
 	}
 
 	body, err := json.Marshal(completionReq)

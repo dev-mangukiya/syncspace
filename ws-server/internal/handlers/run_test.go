@@ -11,23 +11,51 @@ import (
 func TestRunHandler_UserRateLimit(t *testing.T) {
 	h := NewRunHandler(nil, nil, "http://localhost:8081", "test-secret")
 	userID := uuid.New()
+	ctx := context.Background()
 
 	// Should allow first 10 runs
 	for i := 1; i <= 10; i++ {
-		if !h.CheckUserRateLimit(userID) {
+		if !h.CheckUserRateLimit(ctx, userID) {
 			t.Fatalf("expected run %d to be allowed under rate limit", i)
 		}
 	}
 
 	// 11th run within 60s window must be rejected
-	if h.CheckUserRateLimit(userID) {
+	if h.CheckUserRateLimit(ctx, userID) {
 		t.Fatalf("expected 11th run to be rejected by rate limiter")
 	}
 
 	// Another user should still be allowed
 	otherUser := uuid.New()
-	if !h.CheckUserRateLimit(otherUser) {
+	if !h.CheckUserRateLimit(ctx, otherUser) {
 		t.Fatalf("expected different user to have independent rate limit quota")
+	}
+}
+
+func TestRunHandler_TimeoutClamping(t *testing.T) {
+	testCases := []struct {
+		name     string
+		input    int
+		expected int
+	}{
+		{"default zero", 0, 10},
+		{"negative", -5, 10},
+		{"excessive above cap", 99, 10},
+		{"maximum allowed cap", 10, 10},
+		{"custom under cap", 3, 3},
+		{"minimum positive", 1, 1},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			timeout := tc.input
+			if timeout <= 0 || timeout > 10 {
+				timeout = 10
+			}
+			if timeout != tc.expected {
+				t.Fatalf("expected clamped timeout %d, got %d", tc.expected, timeout)
+			}
+		})
 	}
 }
 

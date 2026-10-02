@@ -102,6 +102,7 @@ var (
 	activeContainersMu sync.Mutex
 	activeContainers   = make(map[string]string) // runID -> containerName
 	cancelledRuns      sync.Map
+	concurrencySem     = make(chan struct{}, 5)  // Global concurrency cap: max 5 simultaneous containers
 )
 
 func registerContainer(runID, containerName string) {
@@ -137,8 +138,23 @@ func main() {
 	// Shared secret for service-to-service auth
 	execSecret := getEnv("EXEC_SERVICE_SECRET", "")
 	if env == "production" {
-		if execSecret == "" || execSecret == "syncspace_exec_secret_dev" || len(execSecret) < 16 {
+		if execSecret == "" || len(execSecret) < 16 {
 			log.Fatal("FATAL: EXEC_SERVICE_SECRET must be configured with a strong secret (>= 16 chars) in production")
+		}
+		knownDevDefaults := []string{
+			"syncspace_exec_secret_dev",
+			"dev-exec-secret",
+			"default-secret",
+			"secret",
+			"password",
+			"changeme",
+			"change-this-to-a-real-secret-in-production",
+			"dev-jwt-secret-change-in-production",
+		}
+		for _, devDef := range knownDevDefaults {
+			if strings.EqualFold(execSecret, devDef) {
+				log.Fatalf("FATAL: EXEC_SERVICE_SECRET cannot use known default/example secret %q in production", execSecret)
+			}
 		}
 	} else if execSecret == "" {
 		execSecret = "syncspace_exec_secret_dev"
@@ -310,6 +326,17 @@ func main() {
 			registerContainer(runID, containerName)
 			defer unregisterContainer(runID)
 
+			// Enforce global concurrency cap (max 5 simultaneous containers across all instances)
+			select {
+			case concurrencySem <- struct{}{}:
+				defer func() { <-concurrencySem }()
+			default:
+				writeJSON(w, http.StatusTooManyRequests, map[string]string{
+					"error": "server execution concurrency limit reached (max 5 simultaneous runs); please try again shortly",
+				})
+				return
+			}
+
 			// Setup headers for NDJSON streaming
 			flusher, ok := w.(http.Flusher)
 			if !ok {
@@ -383,7 +410,7 @@ func main() {
 			args = append(args, languageCommands[req.Language]...)
 
 			runTimeout := timeoutSec
-			if req.TimeoutSeconds > 0 && req.TimeoutSeconds <= 30 {
+			if req.TimeoutSeconds > 0 && req.TimeoutSeconds < timeoutSec {
 				runTimeout = req.TimeoutSeconds
 			}
 
@@ -578,6 +605,17 @@ func main() {
 			registerContainer(runID, containerName)
 			defer unregisterContainer(runID)
 
+			// Enforce global concurrency cap (max 5 simultaneous containers across all instances)
+			select {
+			case concurrencySem <- struct{}{}:
+				defer func() { <-concurrencySem }()
+			default:
+				writeJSON(w, http.StatusTooManyRequests, map[string]string{
+					"error": "server execution concurrency limit reached (max 5 simultaneous runs); please try again shortly",
+				})
+				return
+			}
+
 			homeDir, _ := os.UserHomeDir()
 			execTmpBase := fmt.Sprintf("%s/.syncspace-exec-tmp", homeDir)
 			_ = os.MkdirAll(execTmpBase, 0755)
@@ -620,7 +658,12 @@ func main() {
 			args = append(args, image)
 			args = append(args, languageCommands[req.Language]...)
 
-			ctx, cancel := context.WithTimeout(r.Context(), time.Duration(timeoutSec)*time.Second)
+			runTimeout := timeoutSec
+			if req.TimeoutSeconds > 0 && req.TimeoutSeconds < timeoutSec {
+				runTimeout = req.TimeoutSeconds
+			}
+
+			ctx, cancel := context.WithTimeout(r.Context(), time.Duration(runTimeout)*time.Second)
 			defer cancel()
 
 			start := time.Now()

@@ -63,6 +63,7 @@ type RunRequest struct {
 	FilePath string `json:"file_path"`
 	Code     string `json:"code"`
 	Language string `json:"language"`
+	Timeout  int    `json:"timeout,omitempty"`
 }
 
 // NewRunHandler creates a new RunHandler instance
@@ -82,8 +83,19 @@ func NewRunHandler(db *database.DB, hub *realtime.Hub, execURL, execSecret strin
 	}
 }
 
-// CheckUserRateLimit checks if user has exceeded 10 runs in the last 60 seconds
-func (h *RunHandler) CheckUserRateLimit(userID uuid.UUID) bool {
+// CheckUserRateLimit checks if user has exceeded 10 runs in the last 60 seconds (across all instances via Redis)
+func (h *RunHandler) CheckUserRateLimit(ctx context.Context, userID uuid.UUID) bool {
+	if h.hub != nil && h.hub.Redis != nil && h.hub.Redis.Client() != nil {
+		rKey := fmt.Sprintf("exec_rate:%s:%d", userID.String(), time.Now().Unix()/60)
+		count, err := h.hub.Redis.Client().Incr(ctx, rKey).Result()
+		if err == nil {
+			if count == 1 {
+				h.hub.Redis.Client().Expire(ctx, rKey, 65*time.Second)
+			}
+			return count <= UserRunRateLimit
+		}
+	}
+
 	h.userRateMu.Lock()
 	defer h.userRateMu.Unlock()
 
@@ -187,8 +199,8 @@ func (h *RunHandler) Run(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rate limiting: max 10 runs per minute per user
-	if !h.CheckUserRateLimit(claims.UserID) {
+	// Rate limiting: max 10 runs per minute per user (checked across instances via Redis)
+	if !h.CheckUserRateLimit(r.Context(), claims.UserID) {
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{
 			"error": "rate limit exceeded: max 10 code runs per minute",
 		})
@@ -230,6 +242,12 @@ func (h *RunHandler) Run(w http.ResponseWriter, r *http.Request) {
 
 	if req.Language == "" {
 		req.Language = detectLanguage(req.FilePath)
+	}
+
+	// Clamp requested timeout to [1, 10] seconds.
+	// Default is 10s. Client cannot exceed server cap of 10s.
+	if req.Timeout <= 0 || req.Timeout > 10 {
+		req.Timeout = 10
 	}
 
 	runID := uuid.New().String()[:8]
@@ -278,7 +296,7 @@ func (h *RunHandler) Run(w http.ResponseWriter, r *http.Request) {
 		"run_id":          runID,
 		"code":            req.Code,
 		"language":        req.Language,
-		"timeout_seconds": 10,
+		"timeout_seconds": req.Timeout,
 	})
 
 	execReq, err := http.NewRequestWithContext(r.Context(), "POST", h.execURL+"/api/exec/stream", bytes.NewReader(execPayload))

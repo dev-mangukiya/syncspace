@@ -173,7 +173,7 @@ export const OutputPanel: React.FC<OutputPanelProps> = ({
         onMouseLeave={e => (e.currentTarget.style.background = 'var(--color-border-subtle)')}
       />
 
-      <div style={{
+      <div id="output-panel" style={{
         height: `${outputHeight}px`,
         flexShrink: 0,
         background: 'var(--color-bg-app)',
@@ -519,11 +519,11 @@ export const OutputPanel: React.FC<OutputPanelProps> = ({
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
             {selectedHistoryRun ? (
               <span>
-                exit {selectedHistoryRun.exit_code} · {selectedHistoryRun.duration_ms}ms · — · network: blocked (historical run {selectedHistoryRun.run_id})
+                exit {selectedHistoryRun.exit_code} · {selectedHistoryRun.duration_ms}ms · network: blocked (historical run {selectedHistoryRun.run_id})
               </span>
             ) : lastRunResult ? (
               <span>
-                exit {lastRunResult.exitCode} · {lastRunResult.durationMs}ms · {formatMemory(lastRunResult.peakMemoryBytes)} · network: blocked
+                exit {lastRunResult.exitCode} · {lastRunResult.durationMs}ms · network: blocked
                 {lastRunResult.truncated && ' · (output truncated)'}
                 {lastRunResult.timedOut && ' · (timed out)'}
                 {lastRunResult.cancelled && ' · (cancelled)'}
