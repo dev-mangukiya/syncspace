@@ -31,7 +31,10 @@ func NewAIHandler() *AIHandler {
 	if baseURL == "" {
 		baseURL = "https://api.groq.com/openai/v1"
 	}
-	apiKey := os.Getenv("GROQ_API_KEY")
+	apiKey := strings.TrimSpace(os.Getenv("GROQ_API_KEY"))
+	if idx := strings.Index(apiKey, "#"); idx != -1 {
+		apiKey = strings.TrimSpace(apiKey[:idx])
+	}
 
 	handler := &AIHandler{
 		apiKey:     apiKey,
