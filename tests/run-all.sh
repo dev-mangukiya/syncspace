@@ -35,6 +35,7 @@ SUITES=(
   "tests/test-phase-d-e2e.mjs"
   "tests/test-three-state-demo.mjs"
   "tests/test-ai-plant-bug.mjs"
+  "tests/test-multi-instance.mjs"
   "tests/verify-crdt.mjs"
   "tests/verify-live-sync.mjs"
   "tests/verify-unload.mjs"
