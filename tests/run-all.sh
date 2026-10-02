@@ -76,9 +76,9 @@ for SUITE in "${SUITES[@]}"; do
 
   if grep -qi "RESULTS:.*passed" "${SUITE_LOG}"; then
     RES_LINE=$(grep -i "RESULTS:" "${SUITE_LOG}" | tail -n 1)
-    PASSED=$(echo "${RES_LINE}" | sed -n 's/.* \([0-9]*\) passed.*/\1/p')
-    FAILED=$(echo "${RES_LINE}" | sed -n 's/.* \([0-9]*\) failed.*/\1/p')
-    SKIPPED=$(echo "${RES_LINE}" | sed -n 's/.* \([0-9]*\) skipped.*/\1/p')
+    PASSED=$(echo "${RES_LINE}" | grep -ioE '[0-9]+ passed' | head -n 1 | awk '{print $1}')
+    FAILED=$(echo "${RES_LINE}" | grep -ioE '[0-9]+ failed' | head -n 1 | awk '{print $1}')
+    SKIPPED=$(echo "${RES_LINE}" | grep -ioE '[0-9]+ skipped' | head -n 1 | awk '{print $1}')
     [ -z "${PASSED}" ] && PASSED=0
     [ -z "${FAILED}" ] && FAILED=0
     [ -z "${SKIPPED}" ] && SKIPPED=0
