@@ -125,13 +125,19 @@ async function main() {
 
   // 3. Browser Contexts E2E Verification
   console.log('\n--- 3. Launching Dual Browser Contexts (Alice & Bob) ---');
-  const executablePath = '/Users/devmangukiya/Library/Caches/ms-playwright/chromium_headless_shell-1200/chrome-headless-shell-mac-arm64/chrome-headless-shell';
-  const browser = await chromium.launch({ executablePath, headless: true });
+  const browser = await chromium.launch({
+    channel: 'chrome',
+    headless: true,
+    args: ['--no-sandbox', '--disable-gpu'],
+  });
 
   const toCookies = (jar) => Object.entries(jar.cookies).map(([name, value]) => ({
     name,
     value,
-    url: 'http://localhost:3000',
+    domain: 'localhost',
+    path: '/',
+    httpOnly: name.includes('access') || name.includes('refresh') || name.includes('token'),
+    sameSite: 'Lax',
   }));
 
   const contextA = await browser.newContext({ viewport: { width: 1280, height: 800 } });
@@ -161,6 +167,8 @@ async function main() {
   await pageC.goto(`${BASE}/w/${shortId}`);
   await pageC.waitForSelector('.monaco-editor', { timeout: 15000 });
   const runBtnC = pageC.locator('button.btn-run');
+  await runBtnC.waitFor({ state: 'visible', timeout: 15000 });
+  await pageC.waitForTimeout(800);
   const isDisabledC = await runBtnC.isDisabled();
   assert('Viewer UI: Run button is disabled for Charlie', isDisabledC);
 
@@ -172,6 +180,8 @@ async function main() {
 
   // Alice triggers run of app.py (seeded template)
   const runBtnA = pageA.locator('button.btn-run');
+  await runBtnA.waitFor({ state: 'visible', timeout: 15000 });
+  await pageA.waitForSelector('button.btn-run:not([disabled])', { timeout: 10000 });
   await runBtnA.click();
 
   // Bob's page should show Alice running and stream output

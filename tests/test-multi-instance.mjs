@@ -152,7 +152,7 @@ async function main() {
     language: 'python',
     template: 'blank',
   }, jarAlice, { 'X-CSRF-Token': csrfAlice });
-  const shortId = ws.data.short_id;
+  const shortId = ws.data?.short_id;
 
   // Invite Bob as editor
   await req(INSTANCE1_URL, 'POST', `/api/workspaces/${shortId}/members`, {

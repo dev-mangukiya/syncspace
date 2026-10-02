@@ -117,6 +117,13 @@ async function main() {
   await context.addCookies(cookiesToAdd);
 
   const page = await context.newPage();
+  page.on('console', msg => console.log('  [browser]', msg.text()));
+  page.on('pageerror', err => console.log('  [browser error]', err.message));
+  page.on('response', resp => {
+    if (resp.status() >= 400) {
+      console.log('  [HTTP ERROR]', resp.status(), resp.url());
+    }
+  });
   await page.goto(`${APP_URL}/w/${shortId}`, { waitUntil: 'networkidle' });
   await page.waitForSelector('.monaco-editor', { timeout: 15000 });
   await page.waitForTimeout(2000);
@@ -132,8 +139,14 @@ async function main() {
   } catch {}
   await page.waitForTimeout(500);
 
+  const outputTab = page.locator('button:has-text("Output")').first();
+  if (await outputTab.isVisible()) {
+    await outputTab.click();
+  }
+
   const runBtn = page.locator('button.btn-run').first();
   await runBtn.waitFor({ state: 'visible', timeout: 15000 });
+  await page.waitForSelector('button.btn-run:not([disabled])', { timeout: 10000 });
   await runBtn.click();
   console.log('  Run button clicked...');
 
@@ -203,6 +216,7 @@ async function main() {
 
   // 4. STATE 3: RUN FIXED CODE (PASSING CHECK)
   console.log('4. STATE 3: RUN FIXED CODE (PASSING CHECK)');
+  await page.waitForSelector('button.btn-run:not([disabled])', { timeout: 10000 });
   await runBtn.click();
   console.log('  Run button clicked on fixed code...');
 
