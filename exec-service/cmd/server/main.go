@@ -79,13 +79,13 @@ var languageImages = map[string]string{
 	"ruby":       "ruby:3.3-alpine",
 }
 
-// Commands to run for each language
+// Commands to run for each language (accept code directly via stdin)
 var languageCommands = map[string][]string{
-	"python":     {"python3", "/code/main.py"},
-	"javascript": {"node", "/code/main.js"},
-	"typescript": {"node", "/code/main.js"},
-	"go":         {"go", "run", "/code/main.go"},
-	"ruby":       {"ruby", "/code/main.rb"},
+	"python":     {"python3", "-u", "-"},
+	"javascript": {"node", "-"},
+	"typescript": {"node", "-"},
+	"go":         {"sh", "-c", "cat > /tmp/main.go && go run /tmp/main.go"},
+	"ruby":       {"ruby", "-"},
 }
 
 // File extensions for each language
@@ -357,47 +357,20 @@ func main() {
 				flusher.Flush()
 			}
 
-			// Create temporary directory for code
-			homeDir, _ := os.UserHomeDir()
-			execTmpBase := fmt.Sprintf("%s/.syncspace-exec-tmp", homeDir)
-			_ = os.MkdirAll(execTmpBase, 0755)
-			tmpDir, err := os.MkdirTemp(execTmpBase, "run-*")
-			if err != nil {
-				writeStreamEvent(StreamEvent{
-					Event: "finished",
-					RunID: runID,
-					Error: "failed to create execution directory",
-				})
-				return
-			}
-			defer os.RemoveAll(tmpDir)
-			_ = os.Chmod(tmpDir, 0755)
-
-			ext := languageExtensions[req.Language]
-			codePath := fmt.Sprintf("%s/main.%s", tmpDir, ext)
-			if err := os.WriteFile(codePath, []byte(req.Code), 0644); err != nil {
-				writeStreamEvent(StreamEvent{
-					Event: "finished",
-					RunID: runID,
-					Error: "failed to write code file",
-				})
-				return
-			}
-
-			// Docker isolation arguments
+			// Docker isolation arguments (passes code directly via stdin, eliminating host volume mounts)
 			args := []string{
 				"run",
+				"-i",
 				"--name", containerName,
 				"--network", "none",
 				"--memory", memoryLimit,
 				"--cpus", cpuLimit,
 				"--pids-limit", pidsLimit,
 				"--read-only",
-				"--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+				"--tmpfs", "/tmp:rw,exec,nosuid,size=64m",
 				"--security-opt", "no-new-privileges",
 				"--cap-drop", "ALL",
 				"--user", "65534:65534",
-				"-v", fmt.Sprintf("%s:/code:ro", tmpDir),
 			}
 
 			if req.Language == "go" {
@@ -419,6 +392,7 @@ func main() {
 
 			start := time.Now()
 			cmd := exec.CommandContext(ctx, "docker", args...)
+			cmd.Stdin = strings.NewReader(req.Code)
 
 			stdoutPipe, err := cmd.StdoutPipe()
 			if err != nil {
@@ -616,37 +590,20 @@ func main() {
 				return
 			}
 
-			homeDir, _ := os.UserHomeDir()
-			execTmpBase := fmt.Sprintf("%s/.syncspace-exec-tmp", homeDir)
-			_ = os.MkdirAll(execTmpBase, 0755)
-			tmpDir, err := os.MkdirTemp(execTmpBase, "run-*")
-			if err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create temp dir"})
-				return
-			}
-			defer os.RemoveAll(tmpDir)
-			_ = os.Chmod(tmpDir, 0755)
-
-			ext := languageExtensions[req.Language]
-			codePath := fmt.Sprintf("%s/main.%s", tmpDir, ext)
-			if err := os.WriteFile(codePath, []byte(req.Code), 0644); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to write code"})
-				return
-			}
-
+			// Docker isolation arguments (passes code directly via stdin, eliminating host volume mounts)
 			args := []string{
 				"run",
+				"-i",
 				"--name", containerName,
 				"--network", "none",
 				"--memory", memoryLimit,
 				"--cpus", cpuLimit,
 				"--pids-limit", pidsLimit,
 				"--read-only",
-				"--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+				"--tmpfs", "/tmp:rw,exec,nosuid,size=64m",
 				"--security-opt", "no-new-privileges",
 				"--cap-drop", "ALL",
 				"--user", "65534:65534",
-				"-v", fmt.Sprintf("%s:/code:ro", tmpDir),
 			}
 
 			if req.Language == "go" {
@@ -668,6 +625,7 @@ func main() {
 
 			start := time.Now()
 			cmd := exec.CommandContext(ctx, "docker", args...)
+			cmd.Stdin = strings.NewReader(req.Code)
 
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout = &limitedWriter{buf: &stdout, limit: maxOutputSize}
@@ -677,7 +635,7 @@ func main() {
 				_ = exec.Command("docker", "rm", "-f", containerName).Run()
 			}()
 
-			err = cmd.Run()
+			err := cmd.Run()
 			duration := time.Since(start)
 
 			response := ExecResponse{
