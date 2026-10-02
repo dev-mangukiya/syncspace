@@ -1491,7 +1491,7 @@ export default function WorkspacePage() {
       </div>
 
       {/* ─── Status Bar ─── */}
-      <footer style={{
+      <footer id="workspace-status-bar" style={{
         height: '24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         padding: '0 var(--space-3)', background: 'var(--color-bg-surface)',
         borderTop: '1px solid var(--color-border-subtle)',

@@ -268,13 +268,27 @@ export class MonacoBinding {
     }
   }
 
+  private _destroyed = false;
+
   destroy() {
-    this._monacoChangeHandler.dispose();
-    this._monacoDisposeHandler.dispose();
-    this.ytext.unobserve(this._ytextObserver);
-    this.doc.off('beforeAllTransactions', this._beforeTransaction);
+    if (this._destroyed) return;
+    this._destroyed = true;
+    try {
+      this._monacoChangeHandler?.dispose();
+    } catch { /* ignore */ }
+    try {
+      this._monacoDisposeHandler?.dispose();
+    } catch { /* ignore */ }
+    try {
+      this.ytext?.unobserve(this._ytextObserver);
+    } catch { /* ignore */ }
+    try {
+      this.doc?.off('beforeAllTransactions', this._beforeTransaction);
+    } catch { /* ignore */ }
     if (this.awareness) {
-      this.awareness.off('change', this._rerenderDecorations);
+      try {
+        this.awareness.off('change', this._rerenderDecorations);
+      } catch { /* ignore */ }
     }
   }
 }
