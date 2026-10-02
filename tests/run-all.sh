@@ -37,12 +37,12 @@ SUITES=(
   "tests/test-seeding-race.mjs"
   "tests/test-phase-d-e2e.mjs"
   "tests/test-three-state-demo.mjs"
-  "tests/test-ai-plant-bug.mjs"
   "tests/test-multi-instance.mjs"
   "tests/verify-crdt.mjs"
   "tests/verify-live-sync.mjs"
   "tests/verify-unload.mjs"
   "tests/verify-cursors.mjs"
+  "tests/test-ai-plant-bug.mjs"
 )
 
 TOTAL_PASSED=0
@@ -94,6 +94,11 @@ for SUITE in "${SUITES[@]}"; do
   PASSED=0
   FAILED=0
   SKIPPED=0
+
+  # Brief pause before AI/E2E suites to respect per-minute provider rate limits
+  if [[ "${SUITE_NAME}" == *"ai"* || "${SUITE_NAME}" == *"demo"* || "${SUITE_NAME}" == *"phase-d"* ]]; then
+    sleep 10
+  fi
 
   # Execute suite and check process exit code
   if node "${SUITE}" > "${SUITE_LOG}" 2>&1; then

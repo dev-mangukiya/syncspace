@@ -1,0 +1,32 @@
+═══════════════════════════════════════════════════════════════
+ SEEDING RACE CONDITION TEST (2, 3, 5 CONTEXTS) - REPRODUCTION RUN
+═══════════════════════════════════════════════════════════════
+
+───────────────────────────────────────────────────────────────
+ TESTING SEEDING CONCURRENCY WITH 2 CONTEXTS
+───────────────────────────────────────────────────────────────
+  Workspace: f5df2462bca94d76b1cb1a13bc498bf0, File: calc.py
+  Initial length: 60 chars
+  Navigating 2 pages simultaneously via Promise.all...
+  Context 1: length=120, "def compute" count=2
+  ❌ Context 1 HAS DUPLICATED / CORRUPTED CONTENT!
+     Got:
+# Seeded Content 1790933355331
+def compute():
+    return 42
+# Seeded Content 1790933355331
+def compute():
+    return 42
+  Context 2: length=120, "def compute" count=2
+  ❌ Context 2 HAS DUPLICATED / CORRUPTED CONTENT!
+     Got:
+# Seeded Content 1790933355331
+def compute():
+    return 42
+# Seeded Content 1790933355331
+def compute():
+    return 42
+  Database persisted content count: 2
+
+❌ TEST FAILED AS EXPECTED (REPRODUCED): Seeding race detected with 2 clients: content duplicated (occurrences=2)
+Exit code: 1

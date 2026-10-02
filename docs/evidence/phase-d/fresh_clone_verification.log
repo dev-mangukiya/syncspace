@@ -1,0 +1,40 @@
+═══════════════════════════════════════════════════════════════════
+ FRESH CLONE END-TO-END VERIFICATION
+═══════════════════════════════════════════════════════════════════
+
+1. Launching browser to test fresh clone flow...
+2. Navigating to /auth/signup and creating user fresh_1790935992317@example.com...
+   ✅ Signed up successfully and redirected to /dashboard
+3. Creating a new workspace with default template...
+   ✅ Created workspace and opened: http://localhost:3000/w/3d85b729aeaa4dfe8ff27b1439649b5d
+   ✅ Monaco editor mounted and workspace loaded
+4. Checking AI assistant panel status...
+   AI Panel mentions configuration requirement: YES
+   ✅ AI panel confirms: AI is not configured (missing GROQ_API_KEY)
+   Backend /api/ai/info response: {"configured":false,"available":false,"model":"openai/gpt-oss-120b","status_msg":"AI isn't configured on this server"}
+   ✅ Backend explicitly confirms configured=false: true
+5. Pressing Run button to execute code in sandbox...
+   Waiting for sandbox execution output...
+   ✅ Sandbox execution completed!
+   Terminal output captured:
+     > console.log("Hello from SyncSpace!");
+     > function paginate(items, page = 1, pageSize = 10) {
+     >   return items.slice(start, end);
+     > Exit 0
+     > Hello from SyncSpace!
+     >  PASS: Page 1 (size=5) returned 5 items
+     >  PASS: Page 2 (size=5) returned 5 items
+     >  PASS: Page 3 (size=10) returned 10 items
+     > exit 0 · 675ms · network: blocked
+
+   Asserting run output:
+     Exit 0: ✅ YES
+     Program Output ("Hello from SyncSpace!"): ✅ YES
+
+6. Screenshot saved to /Users/devmangukiya/.gemini/antigravity-ide/brain/e6dc6e37-67ed-4370-92e0-401d95603a45/fresh_clone_run_and_ai.png
+   Screenshot copied to docs/evidence/phase-d/fresh_clone_run_and_ai.png
+
+═══════════════════════════════════════════════════════════════════
+ ALL FRESH CLONE VERIFICATIONS PASSED
+═══════════════════════════════════════════════════════════════════
+

@@ -1,0 +1,97 @@
+═══════════════════════════════════════════════════════════════
+BREAK THE SANDBOX (SAFE) FULL 7-POINT VERIFICATION SUITE
+═══════════════════════════════════════════════════════════════
+
+═══════════════════════════════════════════════════════════════
+ RUNNING 7-POINT BREAK SET FOR: PYTHON
+═══════════════════════════════════════════════════════════════
+--- [python] Test 1: Infinite Loop (Wall-time cap 2s) ---
+Elapsed: 2158ms | ExitCode: -1 | TimedOut: true
+Result: PASS (Contained)
+
+--- [python] Test 2: Memory Hog (128MB limit) ---
+ExitCode: 137 | Output: Killed: memory limit exceeded
+Result: PASS (Contained)
+
+--- [python] Test 3: Fork Bomb (PIDs limit 64) ---
+ExitCode: 1 | Output: Traceback (most recent call last):
+Traceback (most recent call last):
+Traceback (most recent call la
+Result: PASS (Contained)
+
+--- [python] Test 4: Outbound Network Call (Network: none) ---
+Output: Network blocked: [Errno 101] Network unreachable
+Result: PASS (Contained)
+
+--- [python] Test 5: Output Flood (256KB cap) ---
+Output bytes: 262184 | Capped flag: true
+Result: PASS (Contained)
+
+--- [python] Test 6: Write to Read-Only Filesystem ---
+Output: Write blocked: [Errno 30] Read-only file system: '/etc/pwned.txt'
+Result: PASS (Contained)
+
+--- [python] Test 7: Privilege Escalation Attempt ---
+Output: Privilege escalation blocked: [Errno 1] Operation not permitted
+Result: PASS (Contained)
+
+
+═══════════════════════════════════════════════════════════════
+ RUNNING 7-POINT BREAK SET FOR: JAVASCRIPT
+═══════════════════════════════════════════════════════════════
+--- [javascript] Test 1: Infinite Loop (Wall-time cap 2s) ---
+Elapsed: 2069ms | ExitCode: -1 | TimedOut: true
+Result: PASS (Contained)
+
+--- [javascript] Test 2: Memory Hog (128MB limit) ---
+ExitCode: 137 | Output: Killed: memory limit exceeded
+Result: PASS (Contained)
+
+--- [javascript] Test 3: Fork Bomb (PIDs limit 64) ---
+ExitCode: 1 | Output: #  /usr/local/bin/node[58]: std::unique_ptr<long unsigned int> node::WorkerThreadsTaskRunner::Delaye
+Result: PASS (Contained)
+
+--- [javascript] Test 4: Outbound Network Call (Network: none) ---
+Output: Network blocked: connect ENETUNREACH 1.1.1.1:80 - Local (0.0.0.0:0)
+Result: PASS (Contained)
+
+--- [javascript] Test 5: Output Flood (256KB cap) ---
+Output bytes: 262184 | Capped flag: true
+Result: PASS (Contained)
+
+--- [javascript] Test 6: Write to Read-Only Filesystem ---
+Output: Write blocked: EROFS: read-only file system, open '/etc/pwned.txt'
+Result: PASS (Contained)
+
+--- [javascript] Test 7: Privilege Escalation Attempt ---
+Output: Privilege escalation blocked: EPERM, Operation not permitted
+Result: PASS (Contained)
+
+
+--- Leftover Containers Check (docker ps -a) ---
+Nothing left behind (0 leftover containers)
+
+--- Exec-service Health Check ---
+Health response: {"docker_available":true,"goVersion":"go1.22.12","service":"syncspace-exec-service","status":"healthy","timestamp":"2026-10-02T09:44:09.558534458Z","uptime":"3m45.307780566s"}
+
+
+═══════════════════════════════════════════════════════════════
+FINAL RESULTS SUMMARY
+═══════════════════════════════════════════════════════════════
+  ✅ [python] Infinite loop: PASS (Contained)
+  ✅ [python] Memory hog: PASS (Contained)
+  ✅ [python] Fork bomb: PASS (Contained)
+  ✅ [python] Network call: PASS (Contained)
+  ✅ [python] Output flood: PASS (Contained)
+  ✅ [python] Read-only rootfs: PASS (Contained)
+  ✅ [python] Privilege escalation: PASS (Contained)
+  ✅ [javascript] Infinite loop: PASS (Contained)
+  ✅ [javascript] Memory hog: PASS (Contained)
+  ✅ [javascript] Fork bomb: PASS (Contained)
+  ✅ [javascript] Network call: PASS (Contained)
+  ✅ [javascript] Output flood: PASS (Contained)
+  ✅ [javascript] Read-only rootfs: PASS (Contained)
+  ✅ [javascript] Privilege escalation: PASS (Contained)
+  ✅ Container Cleanup: PASS (0 leftover containers)
+
+RESULTS: 15 passed, 0 failed, 0 skipped

@@ -1,0 +1,33 @@
+{
+  "id": "chatcmpl-c7370e86-da7e-428c-a17e-0c25b7446483",
+  "object": "chat.completion",
+  "created": 1790936638,
+  "model": "qwen/qwen3.8-27b",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "```python\ndef convert_temperature(value: float, unit: str) -> float:\n    unit = unit.upper()\n    if unit == 'C':\n        return (value * 9 / 5) + 32\n    elif unit == 'F':\n        return (value - 32) * 5 / 9\n    raise ValueError(f\"Unknown unit: {unit}\")\n\ndef test_converter():\n    assert round(convert_temperature(0, 'C'), 1) == 32.0\n    assert round(convert_temperature(100, 'C'), 1) == 212.0\n    assert round(convert_temperature(212, 'F'), 1) == 100.0\n    assert round(convert_temperature(32, 'F'), 1) == 0.0\n    assert round(convert_temperature(-40, 'C'), 1) == -40.0\n    print(\"ALL TESTS PASSED\")\n\nif __name__ == '__main__':\n    test_converter()\n```"
+      },
+      "logprobs": null,
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "queue_time": 0.23607817,
+    "prompt_tokens": 319,
+    "prompt_time": 0.022484705,
+    "completion_tokens": 229,
+    "completion_time": 0.503839341,
+    "total_tokens": 548,
+    "total_time": 0.526324046
+  },
+  "usage_breakdown": null,
+  "system_fingerprint": "fp_21e59ac2de",
+  "x_groq": {
+    "id": "req_01m3y28rcredvvxbhpp9pkqtym",
+    "seed": 1577627463
+  },
+  "service_tier": "on_demand"
+}

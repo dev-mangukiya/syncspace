@@ -1,0 +1,37 @@
+{
+  "id": "chatcmpl-b1494a28-b18c-49f6-8501-f141d78dd4eb",
+  "object": "chat.completion",
+  "created": 1790936635,
+  "model": "openai/gpt-oss-120b",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "```python\ndef convert_temperature(value: float, unit: str) -> float:\n    \"\"\"\n    Convert a temperature value from Celsius to Fahrenheit or vice‑versa.\n\n    Parameters\n    ----------\n    value : float\n        The temperature value to convert.\n    unit : str\n        The unit of the input temperature. Accepts 'C' (Celsius) or 'F' (Fahrenheit),\n        case‑insensitive.\n\n    Returns\n    -------\n    float\n        The converted temperature:\n        - If ``unit`` is 'C', returns the value in Fahrenheit.\n        - If ``unit`` is 'F', returns the value in Celsius.\n\n    Raises\n    ------\n    ValueError\n        If ``unit`` is not 'C' or 'F'.\n    \"\"\"\n    unit = unit.upper()\n    if unit == 'C':\n        # Celsius to Fahrenheit: (°C × 9/5) + 32\n        return (value * 9 / 5) + 32\n    elif unit == 'F':\n        # Fahrenheit to Celsius: (°F − 32) × 5/9\n        return (value - 32) * 5 / 9\n    raise ValueError(f\"Unknown unit: {unit}\")\n\n\ndef test_converter():\n    assert round(convert_temperature(0, 'C'), 1) == 32.0\n    assert round(convert_temperature(100, 'C'), 1) == 212.0\n    assert round(convert_temperature(212, 'F'), 1) == 100.0\n    assert round(convert_temperature(32, 'F'), 1) == 0.0\n    assert round(convert_temperature(-40, 'C'), 1) == -40.0\n    print(\"ALL TESTS PASSED\")\n\n\nif __name__ == '__main__':\n    test_converter()\n```",
+        "reasoning": "We need to correct conversion formulas. The function convert_temperature takes value and unit, where unit indicates the unit of the input? The test expects convert_temperature(0, 'C') returns 32 (C to F). So unit indicates input unit, and output is converted to opposite unit? For 'C', convert to Fahrenheit: formula (value * 9/5) + 32. For 'F', convert to Celsius: (value - 32) * 5/9. So fix bug: change 5/9 to 9/5.\n\nAlso maybe add docstring, type hints, maybe handle lower case.\n\nReturn float.\n\nImplement.\n\nProvide full file.\n\n"
+      },
+      "logprobs": null,
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "queue_time": 0.219537692,
+    "prompt_tokens": 352,
+    "prompt_time": 0.067397183,
+    "completion_tokens": 531,
+    "completion_time": 1.0971500220000001,
+    "total_tokens": 883,
+    "total_time": 1.164547205,
+    "completion_tokens_details": {
+      "reasoning_tokens": 138
+    }
+  },
+  "usage_breakdown": null,
+  "system_fingerprint": "fp_a655021f7d",
+  "x_groq": {
+    "id": "req_01m3y28mx6em9rqfgfyx5c14mz",
+    "seed": 979935548
+  },
+  "service_tier": "on_demand"
+}

@@ -25,7 +25,7 @@ type AIHandler struct {
 func NewAIHandler() *AIHandler {
 	model := os.Getenv("GROQ_MODEL")
 	if model == "" {
-		model = "openai/gpt-oss-120b" // Default model per C.8
+		model = "qwen/qwen3.8-27b" // Default model per Round 2 bake-off winner
 	}
 	baseURL := os.Getenv("AI_BASE_URL")
 	if baseURL == "" {
@@ -178,15 +178,13 @@ const systemPrompt = `You are SyncSpace AI, an expert coding assistant embedded 
 
 RULES:
 1. Be concise and direct. No preamble, no "Sure!", no "Great question!".
-2. When fixing code: output the COMPLETE corrected file in a single fenced code block with the language tag. Explain what you changed below the code block.
-3. When explaining: use short paragraphs and bullet points. Reference specific line numbers.
-4. When optimizing: show the optimized code in a code block, then list what changed and why.
-5. When writing tests: output runnable test code in a code block.
-6. Always preserve the original code's intent, variable names, and structure unless asked otherwise.
-7. Use markdown formatting. Bold key terms. Use inline code for identifiers.
-8. If the code has no issues, say so clearly.
-9. Never apologize. Never say "I'd be happy to help".
-10. Maximum response: 2000 words.`
+2. When fixing code: output the COMPLETE corrected file in a single fenced code block with the language tag. Explain what you changed in 1-2 brief sentences below the code block.
+3. Keep entire response under 400 words.
+4. When explaining: use short bullet points. Reference specific line numbers.
+5. Always preserve the original code's intent, variable names, and structure unless asked otherwise.
+6. Use markdown formatting. Bold key terms. Use inline code for identifiers.
+7. If the code has no issues, say so clearly.
+8. Never apologize.`
 
 func (h *AIHandler) Chat(w http.ResponseWriter, r *http.Request) {
 	if !h.configured {
@@ -253,14 +251,14 @@ func (h *AIHandler) Chat(w http.ResponseWriter, r *http.Request) {
 	messages = append(messages, APIMessage{Role: "user", Content: userPrompt})
 
 	// Call API with timeout
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
 	defer cancel()
 
 	completionReq := CompletionRequest{
 		Model:           h.model,
 		Messages:        messages,
 		Temperature:     0.2, // Low temperature for high precision coding
-		MaxTokens:       4096,
+		MaxTokens:       1536, // Adequate for complete file replacements
 		ReasoningEffort: "low",    // Keep reasoning effort low for minimal latency
 		ReasoningFormat: "parsed", // Direct reasoning tokens to message.reasoning so message.content is purely clean output
 	}
@@ -295,6 +293,23 @@ func (h *AIHandler) Chat(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[AI] Parse error: %v, body: %s", err, string(respBody[:min(len(respBody), 200)]))
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to parse AI response"})
 		return
+	}
+
+	// If rate-limited by provider, retry once after short backoff
+	if completionResp.Error != nil && strings.Contains(strings.ToLower(completionResp.Error.Message), "rate limit") {
+		log.Println("[AI] Provider rate limit hit, backing off 6s and retrying...")
+		time.Sleep(6 * time.Second)
+		httpReq2, _ := http.NewRequestWithContext(ctx, "POST", h.baseURL+"/chat/completions", bytes.NewReader(body))
+		httpReq2.Header.Set("Content-Type", "application/json")
+		httpReq2.Header.Set("Authorization", "Bearer "+h.apiKey)
+		if resp2, err2 := http.DefaultClient.Do(httpReq2); err2 == nil {
+			defer resp2.Body.Close()
+			respBody2, _ := io.ReadAll(io.LimitReader(resp2.Body, 256*1024))
+			var completionResp2 CompletionResponse
+			if err3 := json.Unmarshal(respBody2, &completionResp2); err3 == nil && completionResp2.Error == nil {
+				completionResp = completionResp2
+			}
+		}
 	}
 
 	if completionResp.Error != nil {

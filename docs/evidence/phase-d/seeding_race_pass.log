@@ -1,0 +1,58 @@
+═══════════════════════════════════════════════════════════════
+ SEEDING RACE CONDITION TEST (2, 3, 5 CONTEXTS)
+═══════════════════════════════════════════════════════════════
+
+───────────────────────────────────────────────────────────────
+ TESTING SEEDING CONCURRENCY WITH 2 CONTEXTS
+───────────────────────────────────────────────────────────────
+  Workspace: 83564f84bffb4b8e99a8b80bcf56c9a4, File: calc.py
+  Initial length: 60 chars
+  Navigating 2 pages simultaneously via Promise.all...
+  Context 1: length=60, "def compute" count=1
+  Context 2: length=60, "def compute" count=1
+  Database persisted content count: 1
+  ✅ 2 contexts converged cleanly with exact single instance of content.
+
+───────────────────────────────────────────────────────────────
+ TESTING SEEDING CONCURRENCY WITH 3 CONTEXTS
+───────────────────────────────────────────────────────────────
+  Workspace: 46c4c84266fe4d3782b062f9d472e2d4, File: calc.py
+  Initial length: 60 chars
+  Navigating 3 pages simultaneously via Promise.all...
+  Context 1: length=60, "def compute" count=1
+  Context 2: length=60, "def compute" count=1
+  Context 3: length=60, "def compute" count=1
+  Database persisted content count: 1
+  ✅ 3 contexts converged cleanly with exact single instance of content.
+
+───────────────────────────────────────────────────────────────
+ TESTING SEEDING CONCURRENCY WITH 5 CONTEXTS
+───────────────────────────────────────────────────────────────
+  Workspace: 48c59e2d3a3a4da9a6cecd4a6eec4d00, File: calc.py
+  Initial length: 60 chars
+  Navigating 5 pages simultaneously via Promise.all...
+  Context 1: length=60, "def compute" count=1
+  Context 2: length=60, "def compute" count=1
+  Context 3: length=60, "def compute" count=1
+  Context 4: length=60, "def compute" count=1
+  Context 5: length=60, "def compute" count=1
+  Database persisted content count: 1
+  ✅ 5 contexts converged cleanly with exact single instance of content.
+
+───────────────────────────────────────────────────────────────
+ TESTING OFFLINE RECONNECT AFTER ROOM RESET (OPTION A PROOF)
+───────────────────────────────────────────────────────────────
+  Client A goes offline...
+  Client A makes offline edits in Monaco...
+  Client A page closed. Waiting for ws-server room cleanup and seed lock release...
+  Client B opens room fresh...
+  Client B initial loaded content length: 60
+  Client A reconnects online...
+  Final Text A length: 60
+  Final Text B length: 60
+  Occurrences in A: 1, B: 1
+  ✅ Offline-reconnect-after-room-reset converged cleanly! Both clients identical, no duplicated seed.
+
+✅ All seeding race tests PASSED!
+ RESULTS: 4 passed, 0 failed, 0 skipped
+

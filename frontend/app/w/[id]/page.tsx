@@ -632,10 +632,9 @@ export default function WorkspacePage() {
         ytext.delete(0, ytext.length);
         ytext.insert(0, code);
       }, 'ai-apply');
-    } else {
-      setEditorContent(code);
     }
-  }, []);
+    setEditorContent(code);
+  }, [activeFile, tabManager]);
 
   const clearChat = useCallback(() => {
     setAIMessages([{

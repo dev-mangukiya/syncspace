@@ -561,12 +561,11 @@ runChecks();
 			{
 				path: "app.py",
 				content: `"""Temperature conversion utility module."""
-print("Hello from SyncSpace!")
 
 def convert_temperature(value: float, unit: str) -> float:
     unit = unit.upper()
     if unit == 'C':
-        return (value * 9 / 5) + 32
+        return (value * 5 / 9) + 32
     elif unit == 'F':
         return (value - 32) * 5 / 9
     raise ValueError(f"Unsupported unit: {unit}")

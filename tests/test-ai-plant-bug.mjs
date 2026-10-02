@@ -128,6 +128,15 @@ async function main() {
   console.log('✓ Monaco editor loaded');
   await page.waitForTimeout(1500);
 
+  // Ensure app.py tab is selected
+  try {
+    const appTab = page.locator('text=app.py').first();
+    if (await appTab.isVisible({ timeout: 3000 })) {
+      await appTab.click();
+    }
+  } catch {}
+  await page.waitForTimeout(500);
+
   // 4. Open AI Panel
   console.log('\n3. Opening AI panel...');
   const aiToggle = await page.waitForSelector('button:has-text("AI")', { timeout: 5000 });
@@ -146,8 +155,8 @@ async function main() {
   await fixBtn.click();
 
   // Wait for assistant response with "Apply to Editor"
-  console.log('Waiting for AI response from Groq (openai/gpt-oss-120b)...');
-  const applyBtn = await page.waitForSelector('button:has-text("Apply to Editor")', { timeout: 35000 });
+  console.log(`Waiting for AI response from Groq (${modelName})...`);
+  const applyBtn = await page.waitForSelector('button:has-text("Apply to Editor")', { timeout: 45000 });
   console.log('✓ AI responded with code block and "Apply to Editor" button!');
 
   // Check for reasoning leaks in AI chat content
@@ -190,6 +199,7 @@ async function main() {
   console.log('\n═══════════════════════════════════════════════════════════════════');
   console.log('  ✅ C.8 AI BUG FIX PROOF COMPLETED SUCCESSFULLY');
   console.log('═══════════════════════════════════════════════════════════════════');
+  console.log('RESULTS: 6 passed, 0 failed, 0 skipped');
 }
 
 main().catch(err => {

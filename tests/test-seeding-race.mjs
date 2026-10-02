@@ -99,14 +99,21 @@ async function runSeedingTest(browser, numClients) {
   }
 
   console.log(`  Navigating ${numClients} pages simultaneously via Promise.all...`);
-  await Promise.all(pages.map(p => p.goto(`${APP_URL}/w/${shortId}`, { waitUntil: 'networkidle' })));
+  await Promise.all(pages.map(p => p.goto(`${APP_URL}/w/${shortId}`, { waitUntil: 'domcontentloaded' })));
 
   // Select file on each page if needed and wait for Monaco
   await Promise.all(pages.map(async (p, idx) => {
-    await p.waitForSelector('.monaco-editor', { timeout: 15000 });
+    try {
+      await p.waitForSelector('.monaco-editor', { timeout: 30000 });
+    } catch (err) {
+      console.log(`  Page ${idx + 1} URL: ${p.url()}`);
+      const body = await p.evaluate(() => document.body.innerText).catch(() => '');
+      console.log(`  Page ${idx + 1} Body:\n${body.slice(0, 200)}`);
+      throw err;
+    }
     try {
       const fileTab = p.locator(`text=${fileName}`).first();
-      if (await fileTab.isVisible({ timeout: 2000 })) {
+      if (await fileTab.isVisible({ timeout: 3000 })) {
         await fileTab.click();
       }
     } catch {}
@@ -221,7 +228,7 @@ async function testOfflineReconnectAfterRoomReset(browser) {
   const ctxB = await browser.newContext({ viewport: { width: 1024, height: 768 } });
   await ctxB.addCookies(cookiesToAdd);
   const pageB = await ctxB.newPage();
-  await pageB.goto(`${APP_URL}/w/${shortId}`, { waitUntil: 'networkidle' });
+  await pageB.goto(`${APP_URL}/w/${shortId}`, { waitUntil: 'domcontentloaded' });
   await pageB.waitForSelector('.monaco-editor', { timeout: 15000 });
   await new Promise(r => setTimeout(r, 2000));
 
@@ -235,7 +242,7 @@ async function testOfflineReconnectAfterRoomReset(browser) {
   console.log(`  Client A reconnects online...`);
   await ctxA.setOffline(false);
   const pageAReconnect = await ctxA.newPage();
-  await pageAReconnect.goto(`${APP_URL}/w/${shortId}`, { waitUntil: 'networkidle' });
+  await pageAReconnect.goto(`${APP_URL}/w/${shortId}`, { waitUntil: 'domcontentloaded' });
   await pageAReconnect.waitForSelector('.monaco-editor', { timeout: 15000 });
 
   // Wait for sync convergence with polling

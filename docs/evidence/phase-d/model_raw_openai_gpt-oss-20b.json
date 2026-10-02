@@ -1,0 +1,37 @@
+{
+  "id": "chatcmpl-97d9d183-2654-4404-9e7f-3f2a8d34811b",
+  "object": "chat.completion",
+  "created": 1790936637,
+  "model": "openai/gpt-oss-20b",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "```python\ndef convert_temperature(value: float, unit: str) -> float:\n    \"\"\"\n    Convert a temperature between Celsius and Fahrenheit.\n\n    Parameters\n    ----------\n    value : float\n        The temperature value to convert.\n    unit : str\n        The unit of the input value. Must be either 'C' for Celsius or\n        'F' for Fahrenheit (case‑insensitive).\n\n    Returns\n    -------\n    float\n        The converted temperature.\n\n    Raises\n    ------\n    ValueError\n        If an unknown unit is supplied.\n    \"\"\"\n    unit = unit.upper()\n    if unit == 'C':\n        # Celsius to Fahrenheit: (C * 9/5) + 32\n        return (value * 9 / 5) + 32\n    elif unit == 'F':\n        # Fahrenheit to Celsius: (F - 32) * 5/9\n        return (value - 32) * 5 / 9\n    raise ValueError(f\"Unknown unit: {unit}\")\n\n\ndef test_converter():\n    assert round(convert_temperature(0, 'C'), 1) == 32.0\n    assert round(convert_temperature(100, 'C'), 1) == 212.0\n    assert round(convert_temperature(212, 'F'), 1) == 100.0\n    assert round(convert_temperature(32, 'F'), 1) == 0.0\n    assert round(convert_temperature(-40, 'C'), 1) == -40.0\n    print(\"ALL TESTS PASSED\")\n\n\nif __name__ == '__main__':\n    test_converter()\n```",
+        "reasoning": "We need to fix bug: conversion from Celsius to Fahrenheit uses wrong factor. Should be (value * 9/5) + 32. Also maybe handle unit case-insensitivity. Already uppercased. Also maybe handle 'C' and 'F' only. The tests expect correct conversions. So modify accordingly.\n\nAlso maybe add docstring. But just fix bug.\n\nReturn float. Use correct formula.\n\nAlso maybe handle unit 'C' and 'F' only. Raise ValueError.\n\nLet's produce corrected file."
+      },
+      "logprobs": null,
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "queue_time": 0.332772966,
+    "prompt_tokens": 352,
+    "prompt_time": 0.018646278,
+    "completion_tokens": 452,
+    "completion_time": 0.478835784,
+    "total_tokens": 804,
+    "total_time": 0.497482062,
+    "completion_tokens_details": {
+      "reasoning_tokens": 105
+    }
+  },
+  "usage_breakdown": null,
+  "system_fingerprint": "fp_851252edc2",
+  "x_groq": {
+    "id": "req_01m3y28pwse448fwv55ytk68f3",
+    "seed": 784740525
+  },
+  "service_tier": "on_demand"
+}

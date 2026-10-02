@@ -1,0 +1,36 @@
+═════════════════════════════════════════════════════════════════════════════════
+ SYNCPACE AUTOMATED REGRESSION RUNNER
+ Started at: 2026-10-02 13:35:24 UTC
+═════════════════════════════════════════════════════════════════════════════════
+
+SUITE                                    STATUS     PASSED   FAILED   SKIPPED 
+─────────────────────────────────────────────────────────────────────────────────
+go-test-ws-server                        ✅ PASS     77       0        0       
+go-test-exec-service                     ✅ PASS     2        0        0       
+test-cookie-auth.mjs                     ✅ PASS     31       0        0       
+test-token-expiry.mjs                    ✅ PASS     12       0        0       
+test-colorslot-stability.mjs             ✅ PASS     15       0        0       
+test-c3-members.mjs                      ✅ PASS     34       0        0       
+test-c4-file-explorer.mjs                ✅ PASS     32       0        0       
+test-c4-verification.mjs                 ✅ PASS     10       0        0       
+test-c5-multi-tab.mjs                    ✅ PASS     16       0        0       
+test-c6-status-bar-palette.mjs           ✅ PASS     28       0        0       
+test-c6-verification-followup.mjs        ✅ PASS     13       0        0       
+test-c7-chat.mjs                         ✅ PASS     38       0        0       
+test-c7-fixes.mjs                        ✅ PASS     22       0        0       
+test-break-sandbox.mjs                   ✅ PASS     15       0        0       
+test-timeout-clamp.mjs                   ✅ PASS     1        0        0       
+test-seeding-race.mjs                    ✅ PASS     4        0        0       
+test-phase-d-e2e.mjs                     ✅ PASS     22       0        0       
+test-three-state-demo.mjs                ✅ PASS     8        0        0       
+test-multi-instance.mjs                  ✅ PASS     7        0        0       
+verify-crdt.mjs                          ✅ PASS     7        0        1       
+verify-live-sync.mjs                     ✅ PASS     5        0        0       
+verify-unload.mjs                        ✅ PASS     1        0        0       
+verify-cursors.mjs                       ✅ PASS     1        0        0       
+test-ai-plant-bug.mjs                    ✅ PASS     6        0        0       
+─────────────────────────────────────────────────────────────────────────────────
+TOTAL                                                 407      0        1       
+═════════════════════════════════════════════════════════════════════════════════
+
+✅ ALL SUITES PASSED (407 assertions passed, 1 skipped, 0 failed)
