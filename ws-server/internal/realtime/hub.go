@@ -38,33 +38,42 @@ type PresenceInfo struct {
 	ColorSlot int    `json:"color_slot"`
 }
 
+// DocumentPersister defines an interface to persist file content directly to storage
+type DocumentPersister interface {
+	PersistFileContent(workspaceSlug, filePath, content string) error
+}
+
 // Hub manages all WebSocket connections, organized by (workspace, file) rooms
 // It relays opaque binary Yjs messages — it does NOT parse Yjs internals.
 // This is intentional: the Go server is a dumb relay, and the CRDT merge
 // logic lives entirely in the Yjs library on each client.
 type Hub struct {
-	mu         sync.RWMutex
-	instanceID string
-	rooms      map[roomKey]map[*Client]bool   // per-file rooms for Yjs relay
-	workspaces map[string]map[*Client]bool    // per-workspace for presence
-	colorSeq   map[string]int                 // workspace -> next color slot
-	register   chan *Client
-	unregister chan *Client
-	Redis      *RedisRelay                    // nil if Redis not configured
-	seedMu     sync.Mutex
-	seedLocks  map[roomKey]string
+	mu            sync.RWMutex
+	instanceID    string
+	rooms         map[roomKey]map[*Client]bool   // per-file rooms for Yjs relay
+	workspaces    map[string]map[*Client]bool    // per-workspace for presence
+	colorSeq      map[string]int                 // workspace -> next color slot
+	register      chan *Client
+	unregister    chan *Client
+	Redis         *RedisRelay                    // nil if Redis not configured
+	seedMu        sync.Mutex
+	seedLocks     map[roomKey]string
+	contentMu     sync.Mutex
+	latestContent map[roomKey]string             // latest text content per room
+	Persister     DocumentPersister
 }
 
 // NewHub creates and starts a new Hub
 func NewHub() *Hub {
 	h := &Hub{
-		instanceID: uuid.New().String()[:8],
-		rooms:      make(map[roomKey]map[*Client]bool),
-		workspaces: make(map[string]map[*Client]bool),
-		colorSeq:   make(map[string]int),
-		register:   make(chan *Client),
-		unregister: make(chan *Client),
-		seedLocks:  make(map[roomKey]string),
+		instanceID:    uuid.New().String()[:8],
+		rooms:         make(map[roomKey]map[*Client]bool),
+		workspaces:    make(map[string]map[*Client]bool),
+		colorSeq:      make(map[string]int),
+		register:      make(chan *Client),
+		unregister:    make(chan *Client),
+		seedLocks:     make(map[roomKey]string),
+		latestContent: make(map[roomKey]string),
 	}
 	go h.run()
 	return h
@@ -132,12 +141,52 @@ func (h *Hub) run() {
 				if _, exists := clients[client]; exists {
 					delete(clients, client)
 					close(client.Send)
+
+					// Edge case 5a: If the departing client was holding the seed lock, release it immediately.
+					// If other clients are still in the room waiting for a seed, elect the next client right now!
+					if h.isSeedLockHolder(rk, client.ID) {
+						h.releaseSeedLock(rk)
+						if len(clients) > 0 {
+							for nextClient := range clients {
+								if h.acquireSeedLock(rk, nextClient.ID) {
+									grantPayload, _ := json.Marshal(map[string]interface{}{
+										"type": "seed_grant",
+										"file": nextClient.FilePath,
+									})
+									select {
+									case nextClient.SendText <- grantPayload:
+									default:
+									}
+									log.Printf("[WS] Re-elected %s as seeder after prior seeder disconnect in %s:%s",
+										nextClient.Username, rk.Workspace, rk.FilePath)
+									break
+								}
+							}
+						}
+					}
+
+					// Edge case 5b: Last client left the room. Flush unpersisted content before eviction!
 					if len(clients) == 0 {
 						delete(h.rooms, rk)
 						h.releaseSeedLock(rk)
 						// Unsubscribe from Redis when last local client leaves
 						if h.Redis != nil {
 							h.Redis.Unsubscribe(rk)
+						}
+
+						h.contentMu.Lock()
+						unflushed, hasUnflushed := h.latestContent[rk]
+						delete(h.latestContent, rk)
+						h.contentMu.Unlock()
+
+						if hasUnflushed && h.Persister != nil {
+							go func(ws, fp, c string) {
+								if err := h.Persister.PersistFileContent(ws, fp, c); err != nil {
+									log.Printf("[WS] Error flushing content on room close for %s:%s: %v", ws, fp, err)
+								} else {
+									log.Printf("[WS] Flushed content to DB on room close for %s:%s (%d bytes)", ws, fp, len(c))
+								}
+							}(rk.Workspace, rk.FilePath, unflushed)
 						}
 					}
 				}
@@ -336,11 +385,11 @@ func (ts *memoryTicketStore) Consume(ticketID string) *Ticket {
 }
 
 // acquireSeedLock attempts to elect clientID as the designated seeder for rk.
-// Uses Redis SET NX with 30s TTL across instances, or in-memory fallback.
+// Uses Redis SET NX with 5s TTL across instances, or in-memory fallback.
 func (h *Hub) acquireSeedLock(rk roomKey, clientID string) bool {
 	if h.Redis != nil && h.Redis.Client() != nil {
 		key := fmt.Sprintf("seed:%s:%s", rk.Workspace, rk.FilePath)
-		ok, err := h.Redis.Client().SetNX(context.Background(), key, clientID, 30*time.Second).Result()
+		ok, err := h.Redis.Client().SetNX(context.Background(), key, clientID, 5*time.Second).Result()
 		if err == nil && ok {
 			return true
 		}
@@ -359,6 +408,17 @@ func (h *Hub) acquireSeedLock(rk roomKey, clientID string) bool {
 	return false
 }
 
+func (h *Hub) isSeedLockHolder(rk roomKey, clientID string) bool {
+	if h.Redis != nil && h.Redis.Client() != nil {
+		key := fmt.Sprintf("seed:%s:%s", rk.Workspace, rk.FilePath)
+		val, err := h.Redis.Client().Get(context.Background(), key).Result()
+		return err == nil && val == clientID
+	}
+	h.seedMu.Lock()
+	defer h.seedMu.Unlock()
+	return h.seedLocks != nil && h.seedLocks[rk] == clientID
+}
+
 func (h *Hub) releaseSeedLock(rk roomKey) {
 	if h.Redis != nil && h.Redis.Client() != nil {
 		key := fmt.Sprintf("seed:%s:%s", rk.Workspace, rk.FilePath)
@@ -370,5 +430,18 @@ func (h *Hub) releaseSeedLock(rk roomKey) {
 		delete(h.seedLocks, rk)
 	}
 	h.seedMu.Unlock()
+}
+
+// StoreRoomSnapshot caches the latest file content sent over the WebSocket
+func (h *Hub) StoreRoomSnapshot(workspace, filePath, content string) {
+	rk := roomKey{Workspace: workspace, FilePath: filePath}
+	h.contentMu.Lock()
+	h.latestContent[rk] = content
+	h.contentMu.Unlock()
+
+	if h.Redis != nil && h.Redis.Client() != nil {
+		key := fmt.Sprintf("content:%s:%s", workspace, filePath)
+		_ = h.Redis.Client().Set(context.Background(), key, content, 24*time.Hour).Err()
+	}
 }
 

@@ -91,6 +91,7 @@ export class SyncProvider {
     });
 
     // When the Y.Doc changes, send sync updates to the server
+    let snapshotTimeout: NodeJS.Timeout | null = null;
     this.doc.on('update', (update: Uint8Array, origin: unknown) => {
       if (origin === this) return; // Don't echo back remote updates
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
@@ -99,6 +100,15 @@ export class SyncProvider {
       encoding.writeVarUint(encoder, MSG_SYNC);
       syncProtocol.writeUpdate(encoder, update);
       this.ws.send(encoding.toUint8Array(encoder));
+
+      // Stream debounced text snapshot over WebSocket for zero-data-loss server persistence
+      if (snapshotTimeout) clearTimeout(snapshotTimeout);
+      snapshotTimeout = setTimeout(() => {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          const text = this.doc.getText('content').toString();
+          this.ws.send(JSON.stringify({ type: 'content_snapshot', content: text }));
+        }
+      }, 300);
     });
 
     // When local awareness changes, broadcast

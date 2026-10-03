@@ -100,6 +100,9 @@ func main() {
 	redisURL := getEnv("REDIS_URL", "")
 	hub.Redis = realtime.NewRedisRelay(hub, redisURL)
 
+	// Attach DB persister to Hub for forced flush on room eviction
+	hub.Persister = &workspacePersister{db: db}
+
 	// Initialize handlers
 	healthHandler := handlers.NewHealthHandler()
 	authHandler := handlers.NewAuthHandler(db, authService)
@@ -300,3 +303,20 @@ func getEnv(key, fallback string) string {
 	}
 	return fallback
 }
+
+type workspacePersister struct {
+	db *database.DB
+}
+
+func (p *workspacePersister) PersistFileContent(workspaceSlug, filePath, content string) error {
+	ws, err := p.db.GetWorkspaceBySlug(workspaceSlug)
+	if err != nil || ws == nil {
+		ws, err = p.db.GetWorkspaceByShortID(workspaceSlug)
+		if err != nil || ws == nil {
+			return fmt.Errorf("workspace not found: %s", workspaceSlug)
+		}
+	}
+	_, err = p.db.UpdateFileContent(ws.ID, filePath, content)
+	return err
+}
+

@@ -1,6 +1,7 @@
 package realtime
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"time"
@@ -83,10 +84,20 @@ func (c *Client) readPump(conn *websocket.Conn) {
 			break
 		}
 
-		// Only relay binary messages — text messages are ignored.
-		// Yjs sync and awareness protocols use binary (MessagePack-like) encoding.
+		// Binary messages carry Yjs sync and awareness protocols
 		if messageType == websocket.BinaryMessage && len(data) > 0 {
 			c.Hub.BroadcastToRoom(c, data)
+		} else if messageType == websocket.TextMessage && len(data) > 0 {
+			// Text messages carry control frames such as real-time content snapshots
+			var msg struct {
+				Type    string `json:"type"`
+				Content string `json:"content"`
+			}
+			if err := json.Unmarshal(data, &msg); err == nil {
+				if msg.Type == "content_snapshot" || msg.Type == "content_update" {
+					c.Hub.StoreRoomSnapshot(c.Workspace, c.FilePath, msg.Content)
+				}
+			}
 		}
 	}
 }

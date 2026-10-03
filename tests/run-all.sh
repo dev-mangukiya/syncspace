@@ -35,6 +35,7 @@ SUITES=(
   "tests/test-break-sandbox.mjs"
   "tests/test-timeout-clamp.mjs"
   "tests/test-seeding-race.mjs"
+  "tests/test-seed-edge-cases.mjs"
   "tests/test-phase-d-e2e.mjs"
   "tests/test-three-state-demo.mjs"
   "tests/test-multi-instance.mjs"

@@ -1,0 +1,64 @@
+═══════════════════════════════════════════════════════════════════
+ SEED LOCK EDGE CASES & UNGRACEFUL DISCONNECT VERIFICATION
+═══════════════════════════════════════════════════════════════════
+   Launching ws-server instance 2 on port 8082...
+[Instance 2 stderr]: 2026/10/03 12:31:49 main.go:26: Starting SyncSpace WS Server...
+
+[Instance 2 stderr]: 2026/10/03 12:31:49 db.go:48: Database connection established: localhost:5432/syncspace
+2026/10/03 12:31:49 main.go:71: Running database migrations...
+
+[Instance 2 stderr]: 2026/10/03 12:31:49 db.go:122: Database migrations complete
+
+[Instance 2 stderr]: 2026/10/03 12:31:49 redis.go:50: [Redis] Connected to redis://localhost:6379 — cross-instance sync enabled
+2026/10/03 12:31:49 ai.go:49: [AI] GROQ_API_KEY is not set. AI panel will report unconfigured.
+
+[Instance 2 stderr]: 2026/10/03 12:31:49 redis.go:281: [Tickets] Using Redis-backed ticket store (cross-instance)
+2026/10/03 12:31:49 main.go:294: SyncSpace WS Server listening on :8082 (env=development)
+
+[Instance 2 stderr]: 2026/10/03 12:31:49 logger.go:21: [GET] /health 127.0.0.1:53475 200 0s
+
+
+─────────────────────────────────────────────────────────────────
+ TEST 5a: SEEDER CRASH MID-SEED (MEASURE TIME STUCK)
+─────────────────────────────────────────────────────────────────
+  ✅ Client A acquired seed_grant
+  ✅ Client B does NOT receive seed_grant initially while A is alive
+   Killing Client A abruptly (socket.terminate)...
+   Time until Client B received seed_grant: 4ms
+  ✅ Client B received seed_grant after Client A crash
+  ✅ Client B re-elected swiftly (4ms <= 2000ms, not stuck for 30s)
+
+─────────────────────────────────────────────────────────────────
+ TEST 5b: LAST-CLIENT UNGRACEFUL DISCONNECT FORCED FLUSH
+─────────────────────────────────────────────────────────────────
+   Sending content_snapshot over WebSocket...
+   Simulating sudden network drop / crash (ws.terminate)...
+   Persisted file content in DB:
+   "CRITICAL_USER_EDIT_SAVED_BEFORE_CRASH = 42\nprint(\"SUCCESS\")\n"
+  ✅ File content in Postgres reflects the edit after ungraceful drop
+
+─────────────────────────────────────────────────────────────────
+ TEST 5c: CROSS-INSTANCE SEED LOCK CONCURRENCY (:8080 & :8082)
+─────────────────────────────────────────────────────────────────
+[Instance 2 stderr]: 2026/10/03 12:31:50 logger.go:21: [POST] /api/ws-ticket 127.0.0.1:53475 200 1ms
+
+   Connecting Client 1 to :8080 and Client 2 to :8082 simultaneously...
+[Instance 2 stderr]: 2026/10/03 12:31:50 logger.go:21: [GET] /ws/cross-inst-ws-6/cross.py 127.0.0.1:53481 200 4ms
+
+[Instance 2 stderr]: 2026/10/03 12:31:50 redis.go:123: [Redis] Subscribed to channel yjs:312a3c2f093649aebe682e80809bf604:cross.py
+
+[Instance 2 stderr]: 2026/10/03 12:31:50 redis.go:187: [Redis] Subscribed to workspace channel ws_ctrl:312a3c2f093649aebe682e80809bf604
+
+[Instance 2 stderr]: 2026/10/03 12:31:50 hub.go:133: [WS] inst2_user_gpu7z joined room 312a3c2f093649aebe682e80809bf604:cross.py (1 in room, 1 in workspace)
+
+   Grant received by Instance 1 client: true
+   Grant received by Instance 2 client: false
+  ✅ Exactly one client received seed_grant across the two instances
+
+═══════════════════════════════════════════════════════════════════
+RESULTS: 6 passed, 0 failed, 0 skipped
+═══════════════════════════════════════════════════════════════════
+
+[Instance 2 stderr]: 2026/10/03 12:31:51 conn.go:82: [WS] read error for inst2_user_gpu7z: websocket: close 1005 (no status)
+2026/10/03 12:31:51 main.go:290: Shutting down gracefully...
+
