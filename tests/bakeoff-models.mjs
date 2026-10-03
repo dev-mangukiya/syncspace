@@ -100,23 +100,16 @@ if __name__ == '__main__':
 ];
 
 function extractCodeBlock(text, language) {
-  const langLower = language.toLowerCase();
-  const textLower = text.toLowerCase();
-  const markers = [
-    '```' + langLower + '\n',
-    '```' + langLower + '\r\n',
-    '```\n',
-    '```\r\n',
-  ];
+  if (!text) return '';
+  const lang = (language || '').toLowerCase().trim();
 
-  for (const marker of markers) {
-    const start = textLower.indexOf(marker);
-    if (start === -1) continue;
-    const codeStart = start + marker.length;
-    const end = text.indexOf('```', codeStart);
-    if (end === -1) continue;
-    return text.slice(codeStart, end).trim();
+  // 1. Match fenced code block with language or generic tag, allowing trailing spaces/newlines
+  const fenceRegex = new RegExp('```(?:' + lang + '|[a-zA-Z0-9_-]+)?\\s*\\r?\\n([\\s\\S]*?)(?:```|$)', 'i');
+  const match = text.match(fenceRegex);
+  if (match && match[1] && match[1].trim()) {
+    return match[1].trim();
   }
+
   return text.trim();
 }
 
@@ -173,7 +166,7 @@ async function streamGroqCompletion(model, bug, attempt = 1) {
       model,
       messages,
       temperature: 0.2,
-      max_tokens: 512,
+      max_tokens: 1536, // Production token budget
       stream: true,
       reasoning_format: 'parsed',
     })
@@ -255,35 +248,44 @@ async function captureRawResponse(model) {
 }
 
 async function main() {
+  const caseArgIdx = process.argv.indexOf('--case');
+  const targetCase = caseArgIdx !== -1 ? process.argv[caseArgIdx + 1] : null;
+  const runsArgIdx = process.argv.indexOf('--runs');
+  const numRuns = runsArgIdx !== -1 ? parseInt(process.argv[runsArgIdx + 1], 10) : 3;
+
+  const bugsToTest = targetCase ? BUGS.filter(b => b.name === targetCase) : BUGS;
+
   console.log('═══════════════════════════════════════════════════════════════════');
   console.log(' MODEL BAKE-OFF: openai/gpt-oss-120b vs openai/gpt-oss-20b vs qwen/qwen3.8-27b');
-  console.log(' (3 bugs x 3 runs = 9 runs per model, 27 total runs)');
+  console.log(` (${bugsToTest.length} bug(s) x ${numRuns} run(s) = ${bugsToTest.length * numRuns} run(s) per model)`);
   console.log('═══════════════════════════════════════════════════════════════════\\n');
 
   // Step 1: Capture one raw response per model for reasoning analysis
-  console.log('1. Capturing raw non-streamed responses to inspect reasoning fields...');
-  for (const model of MODELS) {
-    try {
-      await captureRawResponse(model);
-      await new Promise(r => setTimeout(r, 600));
-    } catch (err) {
-      console.error(`   Error capturing raw response for ${model}: ${err.message}`);
+  if (!targetCase) {
+    console.log('1. Capturing raw non-streamed responses to inspect reasoning fields...');
+    for (const model of MODELS) {
+      try {
+        await captureRawResponse(model);
+        await new Promise(r => setTimeout(r, 600));
+      } catch (err) {
+        console.error(`   Error capturing raw response for ${model}: ${err.message}`);
+      }
     }
   }
 
-  // Step 2: Run the full 27-run bake-off
+  // Step 2: Run the benchmark matrix
   const allRuns = [];
-  console.log('\\n2. Starting full benchmark matrix (3 bugs x 3 runs per model)...\\n');
+  console.log(`\\n2. Starting benchmark matrix (${bugsToTest.length} bug(s) x ${numRuns} run(s) per model)...\\n`);
 
   for (const model of MODELS) {
     console.log(`─────────────────────────────────────────────────────────────────`);
     console.log(` MODEL: ${model}`);
     console.log(`─────────────────────────────────────────────────────────────────`);
 
-    for (let bugIdx = 0; bugIdx < BUGS.length; bugIdx++) {
-      const bug = BUGS[bugIdx];
-      for (let run = 1; run <= 3; run++) {
-        process.stdout.write(`   Bug ${bugIdx + 1} (${bug.name}) Run ${run}/3: `);
+    for (let bugIdx = 0; bugIdx < bugsToTest.length; bugIdx++) {
+      const bug = bugsToTest[bugIdx];
+      for (let run = 1; run <= numRuns; run++) {
+        process.stdout.write(`   Bug ${bugIdx + 1} (${bug.name}) Run ${run}/${numRuns}: `);
         try {
           const streamRes = await streamGroqCompletion(model, bug);
           const extractedCode = extractCodeBlock(streamRes.fullText, bug.language);

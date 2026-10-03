@@ -25,7 +25,7 @@ type AIHandler struct {
 func NewAIHandler() *AIHandler {
 	model := os.Getenv("GROQ_MODEL")
 	if model == "" {
-		model = "qwen/qwen3.8-27b" // Default model per Round 2 bake-off winner
+		model = "openai/gpt-oss-20b" // Default model: cost-effective, 64k output context, 100% accuracy
 	}
 	baseURL := os.Getenv("AI_BASE_URL")
 	if baseURL == "" {
