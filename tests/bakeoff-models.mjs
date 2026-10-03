@@ -3,9 +3,14 @@ import fs from 'fs';
 import path from 'path';
 
 // Standing Rule 0: Never hardcode or inline credentials.
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
+let GROQ_API_KEY = process.env.GROQ_API_KEY;
+if (!GROQ_API_KEY && fs.existsSync('.env')) {
+  const envContent = fs.readFileSync('.env', 'utf8');
+  const match = envContent.match(/^GROQ_API_KEY=(.+)$/m);
+  if (match) GROQ_API_KEY = match[1].trim();
+}
 if (!GROQ_API_KEY) {
-  console.error("ERROR: GROQ_API_KEY environment variable is required.");
+  console.error("ERROR: GROQ_API_KEY environment variable is required or must be present in .env.");
   process.exit(1);
 }
 
