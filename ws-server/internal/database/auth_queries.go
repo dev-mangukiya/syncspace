@@ -99,10 +99,10 @@ func (db *DB) CleanExpiredRefreshTokens() (int64, error) {
 func (db *DB) GetWorkspaceByShortID(shortID string) (*models.Workspace, error) {
 	ws := &models.Workspace{}
 	err := db.QueryRow(`
-		SELECT id, name, slug, short_id, description, owner_id, template, language, is_public, created_at, updated_at
+		SELECT id, name, slug, short_id, description, owner_id, template, language, is_public, is_demo, created_at, updated_at
 		FROM workspaces WHERE short_id = $1
 	`, shortID).Scan(&ws.ID, &ws.Name, &ws.Slug, &ws.ShortID, &ws.Description, &ws.OwnerID,
-		&ws.Template, &ws.Language, &ws.IsPublic, &ws.CreatedAt, &ws.UpdatedAt)
+		&ws.Template, &ws.Language, &ws.IsPublic, &ws.IsDemo, &ws.CreatedAt, &ws.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

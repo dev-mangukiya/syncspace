@@ -29,6 +29,7 @@ type Workspace struct {
 	Template    string    `json:"template"`
 	Language    string    `json:"language"`
 	IsPublic    bool      `json:"is_public"`
+	IsDemo      bool      `json:"is_demo"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }

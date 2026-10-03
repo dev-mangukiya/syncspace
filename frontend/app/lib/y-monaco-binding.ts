@@ -137,8 +137,79 @@ export class MonacoBinding {
     };
     this.doc.on('beforeAllTransactions', this._beforeTransaction);
 
+function updateCursorStyles(awareness: Awareness, myClientID: number) {
+  if (typeof document === 'undefined') return;
+  let styleEl = document.getElementById('y-monaco-cursor-styles') as HTMLStyleElement | null;
+  if (!styleEl) {
+    styleEl = document.createElement('style');
+    styleEl.id = 'y-monaco-cursor-styles';
+    document.head.appendChild(styleEl);
+  }
+
+  let css = `
+    .yRemoteSelection {
+      opacity: 0.35;
+    }
+    .yRemoteSelectionHead {
+      position: absolute;
+      box-sizing: border-box;
+      height: 100%;
+      border-left: 2px solid;
+    }
+    .yRemoteSelectionHead::after {
+      content: ' ';
+      position: absolute;
+      top: -3px;
+      left: -3px;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background-color: inherit;
+    }
+  `;
+
+  awareness.getStates().forEach((state, clientID) => {
+    if (clientID === myClientID || !state.user) return;
+    const color = state.user.color || '#9AA3AE';
+    const label = state.user.isBot ? '🤖 Demo Bot [BOT]' : (state.user.name || 'Anonymous');
+    const bg = state.user.isBot ? '#7C3AED' : color;
+    css += `
+      .yRemoteSelection-${clientID} {
+        background-color: ${color}44;
+      }
+      .yRemoteSelectionHead-${clientID} {
+        border-left-color: ${color} !important;
+        background-color: ${color} !important;
+      }
+      .yRemoteSelectionHead-${clientID}::before {
+        content: "${label}";
+        position: absolute;
+        top: -18px;
+        left: 0;
+        font-size: 10px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-weight: 600;
+        padding: 0 4px;
+        border-radius: 3px;
+        background-color: ${bg};
+        color: #ffffff;
+        white-space: nowrap;
+        pointer-events: none;
+        user-select: none;
+        line-height: 14px;
+        z-index: 50;
+      }
+    `;
+  });
+
+  styleEl.textContent = css;
+}
+
     // Render remote cursors and selections as Monaco decorations
     this._rerenderDecorations = () => {
+      if (awareness) {
+        updateCursorStyles(awareness, this.doc.clientID);
+      }
       editors.forEach(editor => {
         if (awareness && editor.getModel() === monacoModel) {
           const currentDecorations = this._decorations.get(editor) || [];

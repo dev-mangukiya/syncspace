@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -71,6 +73,11 @@ func main() {
 	log.Println("Running database migrations...")
 	if err := db.RunMigrations(migrationsDir); err != nil {
 		log.Fatalf("Failed to run migrations: %v", err)
+	}
+
+	// Ensure demo bot user exists
+	if _, err := db.EnsureDemoBotUser("DemoBotSecret2026!"); err != nil {
+		log.Printf("[DEMO-BOT] Warning: failed to ensure demo bot user: %v", err)
 	}
 
 	// Initialize services
@@ -172,6 +179,7 @@ func main() {
 			r.Put("/{slug}/file", workspaceHandler.UpdateFile)
 			r.Delete("/{slug}/file", workspaceHandler.DeleteFile)
 			r.Post("/{slug}/file/rename", workspaceHandler.RenameFile)
+			r.Post("/{slug}/demo", workspaceHandler.SetDemo)
 
 			// Beacon persist — lightweight endpoint for navigator.sendBeacon
 			// on tab close. Accepts same body as UpdateFile but returns 204
@@ -263,10 +271,28 @@ func main() {
 				return
 			}
 		}
+		// Server-side enforcement: demo bot can NEVER join a non-demo workspace
+		if ticket.Username == "demo-bot" && !ws.IsDemo {
+			http.Error(w, "forbidden: demo bot cannot join non-demo workspaces", http.StatusForbidden)
+			return
+		}
+
 		role, _ := db.GetMemberRole(ws.ID, ticket.UserID)
-		if role == "" && !ws.IsPublic {
+		if role == "" && !ws.IsPublic && !(ws.IsDemo && ticket.Username == "demo-bot") {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
+		}
+
+		// When a human visitor opens a demo room, notify Redis for demo bot trigger
+		if ws.IsDemo && ticket.Username != "demo-bot" && hub.Redis != nil && hub.Redis.Client() != nil {
+			msg, _ := json.Marshal(map[string]interface{}{
+				"type":           "demo_visitor_joined",
+				"workspace_slug": ws.Slug,
+				"short_id":       ws.ShortID,
+				"file_path":      filePath,
+				"visitor":        ticket.Username,
+			})
+			hub.Redis.Client().Publish(context.Background(), "syncspace:demo:triggers", msg)
 		}
 
 		// Use short_id as the canonical room identifier (so slug and short_id both resolve to the same room)

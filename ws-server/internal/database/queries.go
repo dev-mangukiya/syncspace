@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/syncspace/ws-server/internal/models"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // CreateUser inserts a new user
@@ -77,8 +78,9 @@ func (db *DB) GetUserByUsername(username string) (*models.User, error) {
 }
 
 // CreateWorkspace creates a new workspace and adds the owner as a member.
+// CreateWorkspace creates a new workspace and adds the owner as a member.
 // short_id is generated as the first 10 hex chars of a new UUID (opaque, non-guessable).
-func (db *DB) CreateWorkspace(name, slug, description string, ownerID uuid.UUID, template, language string) (*models.Workspace, error) {
+func (db *DB) CreateWorkspace(name, slug, description string, ownerID uuid.UUID, template, language string, isDemo bool) (*models.Workspace, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("begin transaction: %w", err)
@@ -90,12 +92,12 @@ func (db *DB) CreateWorkspace(name, slug, description string, ownerID uuid.UUID,
 
 	ws := &models.Workspace{}
 	err = tx.QueryRow(`
-		INSERT INTO workspaces (name, slug, short_id, description, owner_id, template, language)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		RETURNING id, name, slug, short_id, description, owner_id, template, language, is_public, created_at, updated_at
-	`, name, slug, shortID, description, ownerID, template, language).Scan(
+		INSERT INTO workspaces (name, slug, short_id, description, owner_id, template, language, is_demo)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		RETURNING id, name, slug, short_id, description, owner_id, template, language, is_public, is_demo, created_at, updated_at
+	`, name, slug, shortID, description, ownerID, template, language, isDemo).Scan(
 		&ws.ID, &ws.Name, &ws.Slug, &ws.ShortID, &ws.Description, &ws.OwnerID,
-		&ws.Template, &ws.Language, &ws.IsPublic, &ws.CreatedAt, &ws.UpdatedAt)
+		&ws.Template, &ws.Language, &ws.IsPublic, &ws.IsDemo, &ws.CreatedAt, &ws.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("insert workspace: %w", err)
 	}
@@ -108,6 +110,19 @@ func (db *DB) CreateWorkspace(name, slug, description string, ownerID uuid.UUID,
 		return nil, fmt.Errorf("add owner as member: %w", err)
 	}
 
+	// If this is a demo workspace, ensure demo-bot is enrolled as an editor
+	if isDemo {
+		var botID uuid.UUID
+		err := tx.QueryRow(`SELECT id FROM users WHERE email = 'demo-bot@syncspace.internal'`).Scan(&botID)
+		if err == nil {
+			_, _ = tx.Exec(`
+				INSERT INTO workspace_members (workspace_id, user_id, role, color_slot)
+				VALUES ($1, $2, 'editor', 7)
+				ON CONFLICT (workspace_id, user_id) DO NOTHING
+			`, ws.ID, botID)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
@@ -118,10 +133,10 @@ func (db *DB) CreateWorkspace(name, slug, description string, ownerID uuid.UUID,
 func (db *DB) GetWorkspaceBySlug(slug string) (*models.Workspace, error) {
 	ws := &models.Workspace{}
 	err := db.QueryRow(`
-		SELECT id, name, slug, short_id, description, owner_id, template, language, is_public, created_at, updated_at
+		SELECT id, name, slug, short_id, description, owner_id, template, language, is_public, is_demo, created_at, updated_at
 		FROM workspaces WHERE slug = $1
 	`, slug).Scan(&ws.ID, &ws.Name, &ws.Slug, &ws.ShortID, &ws.Description, &ws.OwnerID,
-		&ws.Template, &ws.Language, &ws.IsPublic, &ws.CreatedAt, &ws.UpdatedAt)
+		&ws.Template, &ws.Language, &ws.IsPublic, &ws.IsDemo, &ws.CreatedAt, &ws.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -135,10 +150,10 @@ func (db *DB) GetWorkspaceBySlug(slug string) (*models.Workspace, error) {
 func (db *DB) GetWorkspaceByID(id uuid.UUID) (*models.Workspace, error) {
 	ws := &models.Workspace{}
 	err := db.QueryRow(`
-		SELECT id, name, slug, short_id, description, owner_id, template, language, is_public, created_at, updated_at
+		SELECT id, name, slug, short_id, description, owner_id, template, language, is_public, is_demo, created_at, updated_at
 		FROM workspaces WHERE id = $1
 	`, id).Scan(&ws.ID, &ws.Name, &ws.Slug, &ws.ShortID, &ws.Description, &ws.OwnerID,
-		&ws.Template, &ws.Language, &ws.IsPublic, &ws.CreatedAt, &ws.UpdatedAt)
+		&ws.Template, &ws.Language, &ws.IsPublic, &ws.IsDemo, &ws.CreatedAt, &ws.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -151,7 +166,7 @@ func (db *DB) GetWorkspaceByID(id uuid.UUID) (*models.Workspace, error) {
 // ListUserWorkspaces returns all workspaces a user is a member of
 func (db *DB) ListUserWorkspaces(userID uuid.UUID) ([]models.WorkspaceWithRole, error) {
 	rows, err := db.Query(`
-		SELECT w.id, w.name, w.slug, w.short_id, w.description, w.owner_id, w.template, w.language, w.is_public,
+		SELECT w.id, w.name, w.slug, w.short_id, w.description, w.owner_id, w.template, w.language, w.is_public, w.is_demo,
 		       w.created_at, w.updated_at, wm.role
 		FROM workspaces w
 		JOIN workspace_members wm ON w.id = wm.workspace_id
@@ -167,13 +182,46 @@ func (db *DB) ListUserWorkspaces(userID uuid.UUID) ([]models.WorkspaceWithRole, 
 	for rows.Next() {
 		var wsr models.WorkspaceWithRole
 		err := rows.Scan(&wsr.ID, &wsr.Name, &wsr.Slug, &wsr.ShortID, &wsr.Description, &wsr.OwnerID,
-			&wsr.Template, &wsr.Language, &wsr.IsPublic, &wsr.CreatedAt, &wsr.UpdatedAt, &wsr.Role)
+			&wsr.Template, &wsr.Language, &wsr.IsPublic, &wsr.IsDemo, &wsr.CreatedAt, &wsr.UpdatedAt, &wsr.Role)
 		if err != nil {
 			return nil, fmt.Errorf("scan workspace: %w", err)
 		}
 		workspaces = append(workspaces, wsr)
 	}
 	return workspaces, nil
+}
+
+// EnsureDemoBotUser checks if the demo-bot account exists and creates it if missing.
+func (db *DB) EnsureDemoBotUser(password string) (*models.User, error) {
+	user, err := db.GetUserByEmail("demo-bot@syncspace.internal")
+	if err == nil && user != nil {
+		return user, nil
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, fmt.Errorf("hash bot password: %w", err)
+	}
+	return db.CreateUser("demo-bot", "demo-bot@syncspace.internal", string(hash))
+}
+
+// SetWorkspaceDemo toggles a workspace's is_demo flag and enrolls demo-bot as editor if true.
+func (db *DB) SetWorkspaceDemo(workspaceID uuid.UUID, isDemo bool) error {
+	_, err := db.Exec(`UPDATE workspaces SET is_demo = $2, updated_at = NOW() WHERE id = $1`, workspaceID, isDemo)
+	if err != nil {
+		return fmt.Errorf("set workspace demo: %w", err)
+	}
+	if isDemo {
+		var botID uuid.UUID
+		err := db.QueryRow(`SELECT id FROM users WHERE email = 'demo-bot@syncspace.internal'`).Scan(&botID)
+		if err == nil {
+			_, _ = db.Exec(`
+				INSERT INTO workspace_members (workspace_id, user_id, role, color_slot)
+				VALUES ($1, $2, 'editor', 7)
+				ON CONFLICT (workspace_id, user_id) DO NOTHING
+			`, workspaceID, botID)
+		}
+	}
+	return nil
 }
 
 // GetMemberRole returns the role of a user in a workspace

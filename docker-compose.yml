@@ -123,6 +123,23 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ── Demo Bot (Ghost Collaborator) ─────────────────────────────
+  demo-bot:
+    build:
+      context: ./services/demo-bot
+      dockerfile: Dockerfile
+    container_name: syncspace-demo-bot
+    environment:
+      WS_SERVER_HTTP_URL: http://ws-server:8080
+      WS_SERVER_WS_URL: ws://ws-server:8080
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      ws-server:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   pgdata:
   redisdata:

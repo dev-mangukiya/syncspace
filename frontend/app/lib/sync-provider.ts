@@ -88,6 +88,7 @@ export class SyncProvider {
       name: options.username,
       color: CURSOR_COLORS[options.colorSlot % CURSOR_COLORS.length].color,
       colorLight: CURSOR_COLORS[options.colorSlot % CURSOR_COLORS.length].light,
+      isBot: false,
     });
 
     // When the Y.Doc changes, send sync updates to the server

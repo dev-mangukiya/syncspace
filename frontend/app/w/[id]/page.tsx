@@ -127,9 +127,17 @@ export default function WorkspacePage() {
   // These refs manage the Monaco ↔ Y.Doc binding for whichever tab is visible.
   const editorRef = useRef<unknown>(null);
   const monacoRef = useRef<unknown>(null);
+interface ActivePeer {
+  clientID: number;
+  name: string;
+  color: string;
+  isBot?: boolean;
+}
+
   const yMonacoBindingRef = useRef<unknown>(null);
   const [syncStatus, setSyncStatus] = useState<'disconnected' | 'connecting' | 'synced'>('disconnected');
   const [peerCount, setPeerCount] = useState(0);
+  const [activePeers, setActivePeers] = useState<ActivePeer[]>([]);
 
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [files, setFiles] = useState<FileEntry[]>([]);
@@ -284,6 +292,7 @@ export default function WorkspacePage() {
     if (!activePath) {
       setSyncStatus('disconnected');
       setPeerCount(0);
+      setActivePeers([]);
       return;
     }
 
@@ -304,12 +313,25 @@ export default function WorkspacePage() {
       setEditorContent(ytext.toString());
     };
 
-    // Track awareness for peer count
+    // Track awareness for peer count & bot badge
     const awarenessHandler = () => {
       const states = provider.awareness.getStates();
       setPeerCount(Math.max(0, states.size - 1));
+      const peers: ActivePeer[] = [];
+      states.forEach((state, clientID) => {
+        if (clientID !== provider.doc.clientID && state.user) {
+          peers.push({
+            clientID,
+            name: state.user.name || 'Anonymous',
+            color: state.user.color || '#9AA3AE',
+            isBot: !!state.user.isBot,
+          });
+        }
+      });
+      setActivePeers(peers);
     };
     provider.awareness.on('change', awarenessHandler);
+    awarenessHandler(); // Run once immediately
 
     // Track content for AI/exec
     const updateHandler = () => {
@@ -1064,6 +1086,47 @@ export default function WorkspacePage() {
 
         {/* Right: presence avatars + user + theme */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+          {/* Bot presence badge if demo bot is connected */}
+          {activePeers.some(p => p.isBot) && (
+            <div
+              id="bot-presence-badge"
+              style={{
+                display: 'flex', alignItems: 'center', gap: '5px',
+                padding: '2px 8px', borderRadius: '12px',
+                background: 'rgba(139, 92, 246, 0.15)',
+                border: '1px solid #8B5CF6',
+                color: '#A78BFA', fontSize: '11px', fontWeight: 600,
+              }}
+              title="Demo Bot (Ghost Collaborator) is active in this workspace"
+            >
+              <Bot size={13} style={{ color: '#8B5CF6' }} />
+              <span>Demo Bot</span>
+              <span style={{
+                fontSize: '9px', padding: '1px 4px', borderRadius: '4px',
+                background: '#8B5CF6', color: 'white', textTransform: 'uppercase',
+                letterSpacing: '0.05em', fontWeight: 700,
+              }}>
+                BOT
+              </span>
+            </div>
+          )}
+
+          {/* Active human peer avatars */}
+          {activePeers.filter(p => !p.isBot).map(p => (
+            <div
+              key={p.clientID}
+              title={`${p.name} (online)`}
+              style={{
+                width: '22px', height: '22px', borderRadius: '50%',
+                background: p.color, display: 'flex', alignItems: 'center',
+                justifyContent: 'center', fontSize: '10px', fontWeight: 600,
+                color: 'white', border: '1px solid var(--color-bg-surface)',
+              }}
+            >
+              {p.name.charAt(0).toUpperCase()}
+            </div>
+          ))}
+
           {/* Peer count */}
           {peerCount > 0 && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)', marginRight: 'var(--space-1)' }}>
@@ -1512,7 +1575,11 @@ export default function WorkspacePage() {
 
           <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }} title="Connected peers in workspace">
             <Users size={12} />
-            <span>{peerCount > 0 ? `${peerCount + 1} online (${peerCount} peer${peerCount > 1 ? 's' : ''})` : '1 online'}</span>
+            <span>
+              {peerCount > 0
+                ? `${peerCount + 1} online (${activePeers.some(p => p.isBot) ? 'Demo Bot + ' : ''}${activePeers.filter(p => !p.isBot).length} peer${activePeers.filter(p => !p.isBot).length !== 1 ? 's' : ''})`
+                : '1 online'}
+            </span>
           </span>
 
           {activeFile && (

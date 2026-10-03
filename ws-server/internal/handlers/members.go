@@ -144,6 +144,14 @@ func (h *MembersHandler) Invite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bot enforcement: demo bot cannot join or be invited into non-demo workspaces
+	if (user.Email == "demo-bot@syncspace.internal" || user.Username == "demo-bot") && !ws.IsDemo {
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "forbidden: demo bot cannot join or be invited into non-demo workspaces",
+		})
+		return
+	}
+
 	// Add as member
 	if err := h.db.AddWorkspaceMember(ws.ID, user.ID, inviteRole); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to add member"})

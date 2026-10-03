@@ -89,6 +89,7 @@ type createWorkspaceRequest struct {
 	Description string `json:"description"`
 	Template    string `json:"template"`
 	Language    string `json:"language"`
+	IsDemo      bool   `json:"is_demo"`
 }
 
 // Create creates a new workspace
@@ -114,7 +115,12 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Template == "" {
-		req.Template = "blank"
+		if req.IsDemo {
+			req.Template = "python"
+			req.Language = "python"
+		} else {
+			req.Template = "blank"
+		}
 	}
 	if req.Language == "" {
 		req.Language = "javascript"
@@ -131,7 +137,7 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		slug = fmt.Sprintf("%s-%d", baseSlug, i)
 	}
 
-	ws, err := h.db.CreateWorkspace(req.Name, slug, req.Description, claims.UserID, req.Template, req.Language)
+	ws, err := h.db.CreateWorkspace(req.Name, slug, req.Description, claims.UserID, req.Template, req.Language, req.IsDemo)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create workspace"})
 		return
@@ -144,6 +150,33 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, ws)
+}
+
+// SetDemo toggles the demo workspace status (owner only)
+func (h *WorkspaceHandler) SetDemo(w http.ResponseWriter, r *http.Request) {
+	ws, role := h.resolveWorkspaceAccess(w, r, false)
+	if ws == nil {
+		return
+	}
+	if role != models.RoleOwner {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "only owner can toggle demo status"})
+		return
+	}
+
+	var req struct {
+		IsDemo bool `json:"is_demo"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		req.IsDemo = true
+	}
+
+	if err := h.db.SetWorkspaceDemo(ws.ID, req.IsDemo); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update demo status"})
+		return
+	}
+
+	ws.IsDemo = req.IsDemo
+	writeJSON(w, http.StatusOK, ws)
 }
 
 // List returns all workspaces for the current user

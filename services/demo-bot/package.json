@@ -1,0 +1,17 @@
+{
+  "name": "syncspace-demo-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "SyncSpace Demo Bot - Autonomous collaborative ghost editor",
+  "main": "index.mjs",
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "dependencies": {
+    "lib0": "^0.2.119",
+    "redis": "^4.7.0",
+    "ws": "^8.22.0",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.33"
+  }
+}
