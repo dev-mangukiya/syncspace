@@ -390,9 +390,8 @@ async function main() {
 
   console.log('\\nDecision Rule Application:');
   if (qualifiedModels.length > 0) {
-    const winner = qualifiedModels[0];
-    console.log(`🏆 WINNER: ${winner.model} (Pass Rate: ${winner.passRate}, Median TTFT: ${winner.medianTtft}ms)`);
-    console.log(`Default model should be set to: ${winner.model}`);
+    console.log(`⚡ Fastest by TTFT: ${winner.model} (Pass Rate: ${winner.passRate}, Median TTFT: ${winner.medianTtft}ms)`);
+    console.log(`Note: Production configured default is openai/gpt-oss-20b (chosen for cost-efficiency and 64k output context).`);
   } else {
     console.log('⚠️ No model satisfied the TTFT <= 1.5s threshold.');
   }
