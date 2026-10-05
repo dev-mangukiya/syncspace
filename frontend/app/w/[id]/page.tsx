@@ -159,6 +159,11 @@ interface ActivePeer {
   const [showInspector, setShowInspector] = useState(false);
   const [showVersionHistory, setShowVersionHistory] = useState(false);
 
+  // BLOCKER-001 disclaimer: banner shown after reconnecting following a disconnect of > 3s
+  const [showReconnectNotice, setShowReconnectNotice] = useState(false);
+  const disconnectTimeRef = useRef<number | null>(null);
+  const wasConnectedRef = useRef<boolean>(false);
+
   // Execution state (Phase D)
   const [isRunning, setIsRunning] = useState(false);
   const [runningUser, setRunningUser] = useState<string | null>(null);
@@ -319,9 +324,25 @@ interface ActivePeer {
     // Update sync status from this tab's provider
     provider.onStatus = ({ connected }) => {
       setSyncStatus(connected ? 'connecting' : 'disconnected');
+      if (!connected) {
+        if (wasConnectedRef.current && disconnectTimeRef.current === null) {
+          disconnectTimeRef.current = Date.now();
+        }
+      }
     };
     provider.onSynced = () => {
       setSyncStatus('synced');
+      // If client reconnected after being disconnected for > 3 seconds,
+      // display BLOCKER-001 disclaimer banner so users check Version History.
+      if (wasConnectedRef.current && disconnectTimeRef.current !== null) {
+        const disconnectedDurationMs = Date.now() - disconnectTimeRef.current;
+        if (disconnectedDurationMs >= 3000) {
+          setShowReconnectNotice(true);
+        }
+        disconnectTimeRef.current = null;
+      }
+      wasConnectedRef.current = true;
+
       const ytext = provider.getText();
       const tab = tabManager.tabState.openTabs.find(t => t.path === activePath);
       if (provider.canSeed() && ytext.length === 0 && tab?.file.content && tab.file.content.length > 0) {
@@ -376,6 +397,11 @@ interface ActivePeer {
     provider.onSimulateOfflineChange = (info) => {
       setSimulatedOffline(info.offline);
       setOfflineEditCount(info.editCount);
+      if (info.offline) {
+        if (disconnectTimeRef.current === null) {
+          disconnectTimeRef.current = Date.now();
+        }
+      }
     };
     provider.onMergeComplete = (info) => {
       setMergeToast({ edits: info.offlineEdits, timestamp: info.mergedAt });
@@ -391,6 +417,7 @@ interface ActivePeer {
     // Set initial sync status
     if (provider.isSynced()) {
       setSyncStatus('synced');
+      wasConnectedRef.current = true;
       setEditorContent(provider.getText().toString());
     } else {
       setSyncStatus('connecting');
@@ -1319,6 +1346,100 @@ interface ActivePeer {
             onReorder={tabManager.reorderTabs}
             onToggleSplit={tabManager.toggleSplitView}
           />
+
+          {/* ─── BLOCKER-001 Reconnect / Offline Warning Banner ─── */}
+          {showReconnectNotice && (
+            <div
+              id="blocker-001-reconnect-notice"
+              role="alert"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '12px',
+                padding: '9px 16px',
+                background: 'rgba(217, 119, 6, 0.12)',
+                borderBottom: '1px solid rgba(217, 119, 6, 0.35)',
+                color: 'var(--color-text)',
+                fontSize: '13px',
+                lineHeight: '1.4',
+                zIndex: 20,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1, minWidth: 0 }}>
+                <div style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  width: '24px', height: '24px', borderRadius: '50%',
+                  background: 'rgba(217, 119, 6, 0.2)', color: '#D97706', flexShrink: 0,
+                }}>
+                  <History size={14} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <span style={{ fontWeight: 600, color: '#D97706', marginRight: '6px' }}>
+                    Reconnected to workspace.
+                  </span>
+                  <span>
+                    If you were offline while editing, check{' '}
+                    <button
+                      id="banner-open-history-link"
+                      onClick={() => setShowVersionHistory(true)}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        padding: 0,
+                        color: '#D97706',
+                        textDecoration: 'underline',
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                        font: 'inherit',
+                      }}
+                    >
+                      Version History
+                    </button>
+                    {' '}to confirm nothing was overwritten.
+                  </span>
+                </div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+                <button
+                  id="banner-open-history-btn"
+                  onClick={() => setShowVersionHistory(true)}
+                  className="btn btn-ghost btn-sm"
+                  style={{
+                    fontSize: '12px',
+                    padding: '3px 8px',
+                    height: '26px',
+                    color: '#D97706',
+                    border: '1px solid rgba(217, 119, 6, 0.4)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                  }}
+                >
+                  <History size={12} />
+                  <span>Version History</span>
+                </button>
+                <button
+                  id="dismiss-reconnect-notice-btn"
+                  onClick={() => setShowReconnectNotice(false)}
+                  aria-label="Dismiss notice"
+                  className="btn btn-ghost btn-sm"
+                  style={{
+                    width: '26px',
+                    height: '26px',
+                    padding: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: 'var(--color-text-muted)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Editor panes — single or split */}
           <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>

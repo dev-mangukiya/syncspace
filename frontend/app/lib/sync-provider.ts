@@ -263,8 +263,31 @@ export class SyncProvider {
       this.onInspectorUpdate?.();
     });
 
+    if (typeof window !== 'undefined') {
+      window.addEventListener('offline', this._handleWindowOffline);
+      window.addEventListener('online', this._handleWindowOnline);
+    }
+
     this.connect();
   }
+
+  private _handleWindowOffline = () => {
+    if (this.destroyed || this.simulatedOffline) return;
+    if (this.ws) {
+      try { this.ws.close(); } catch {}
+      this.ws = null;
+    }
+    this.connected = false;
+    this.synced = false;
+    this.onStatus?.({ connected: false });
+  };
+
+  private _handleWindowOnline = () => {
+    if (this.destroyed || this.simulatedOffline) return;
+    if (!this.connected) {
+      this.connect();
+    }
+  };
 
   private async connect() {
     if (this.destroyed) return;
@@ -489,6 +512,10 @@ export class SyncProvider {
 
   destroy() {
     this.destroyed = true;
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('offline', this._handleWindowOffline);
+      window.removeEventListener('online', this._handleWindowOnline);
+    }
     if (this.solitarySyncTimer) {
       clearTimeout(this.solitarySyncTimer);
       this.solitarySyncTimer = null;

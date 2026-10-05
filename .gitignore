@@ -13,6 +13,7 @@
 **/out/
 **/dist/
 **/bin/
+ws-server/server
 
 # Test artifacts, reports, and generated test screenshots
 tests/*.png
