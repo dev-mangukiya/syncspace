@@ -227,6 +227,7 @@ interface ActivePeer {
   useEffect(() => {
     if (!isAuthenticated || !slug) return;
     const load = async () => {
+      setError('');
       try {
         const [wsRes, filesRes] = await Promise.all([
           workspaceAPI.get(slug),
@@ -268,8 +269,12 @@ interface ActivePeer {
             }]);
           }
         } catch { /* non-fatal */ }
-      } catch { setError('Failed to load workspace'); }
-      finally { setLoading(false); }
+      } catch {
+        setError('Failed to load workspace');
+        setTimeout(() => setError(''), 4000);
+      } finally {
+        setLoading(false);
+      }
     };
     load();
   }, [isAuthenticated, slug, user]);
