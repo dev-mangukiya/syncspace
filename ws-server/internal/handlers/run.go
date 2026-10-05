@@ -32,6 +32,8 @@ type RunHandler struct {
 	hub            *realtime.Hub
 	execURL        string
 	execSecret     string
+	cfClientID     string
+	cfClientSecret string
 	concurrencySem chan struct{}
 
 	// Per-user rate limiting (sliding minute window)
@@ -80,6 +82,24 @@ func NewRunHandler(db *database.DB, hub *realtime.Hub, execURL, execSecret strin
 		userRuns:       make(map[uuid.UUID][]time.Time),
 		activeRuns:     make(map[string]*ActiveRunInfo),
 		localLocks:     make(map[string]string),
+	}
+}
+
+// SetCloudflareAccess configures Cloudflare Access Service Token headers for tunnel authentication
+func (h *RunHandler) SetCloudflareAccess(clientID, clientSecret string) {
+	h.cfClientID = clientID
+	h.cfClientSecret = clientSecret
+}
+
+// applyExecHeaders sets standard auth and content headers for requests to exec-service
+func (h *RunHandler) applyExecHeaders(req *http.Request) {
+	req.Header.Set("Content-Type", "application/json")
+	if h.execSecret != "" {
+		req.Header.Set("X-Exec-Secret", h.execSecret)
+	}
+	if h.cfClientID != "" && h.cfClientSecret != "" {
+		req.Header.Set("CF-Access-Client-Id", h.cfClientID)
+		req.Header.Set("CF-Access-Client-Secret", h.cfClientSecret)
 	}
 }
 
@@ -304,10 +324,7 @@ func (h *RunHandler) Run(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create execution request"})
 		return
 	}
-	execReq.Header.Set("Content-Type", "application/json")
-	if h.execSecret != "" {
-		execReq.Header.Set("X-Exec-Secret", h.execSecret)
-	}
+	h.applyExecHeaders(execReq)
 
 	client := &http.Client{Timeout: 35 * time.Second}
 	resp, err := client.Do(execReq)
@@ -498,10 +515,7 @@ func (h *RunHandler) Cancel(w http.ResponseWriter, r *http.Request) {
 	// Call exec-service cancel
 	cancelBody, _ := json.Marshal(map[string]string{"run_id": active.RunID})
 	cancelReq, _ := http.NewRequestWithContext(r.Context(), "POST", h.execURL+"/api/exec/cancel", bytes.NewReader(cancelBody))
-	cancelReq.Header.Set("Content-Type", "application/json")
-	if h.execSecret != "" {
-		cancelReq.Header.Set("X-Exec-Secret", h.execSecret)
-	}
+	h.applyExecHeaders(cancelReq)
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	_, _ = client.Do(cancelReq)
@@ -552,6 +566,7 @@ func (h *RunHandler) ListRuns(w http.ResponseWriter, r *http.Request) {
 func (h *RunHandler) GetLimits(w http.ResponseWriter, r *http.Request) {
 	// Query exec-service /api/exec/limits
 	req, _ := http.NewRequestWithContext(r.Context(), "GET", h.execURL+"/api/exec/limits", nil)
+	h.applyExecHeaders(req)
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Do(req)
 	if err == nil && resp.StatusCode == http.StatusOK {

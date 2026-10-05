@@ -64,6 +64,45 @@ export class SyncProvider {
   private solitarySyncTimer: ReturnType<typeof setTimeout> | null = null;
   private synced = false;
   private hasSeedGrant = false;
+  private simulatedOffline = false;
+  private offlineEditCount = 0;
+
+  // ── Inspector counters (real WS traffic) ──────────────────
+  private _syncMsgSent = 0;
+  private _syncMsgReceived = 0;
+  private _awarenessMsgSent = 0;
+  private _awarenessMsgReceived = 0;
+  // Fires whenever inspector-relevant state changes (peer join/leave, message, etc.)
+  onInspectorUpdate: (() => void) | null = null;
+
+  /** Get inspector snapshot — all values from real runtime state */
+  getInspectorState() {
+    const states = this.awareness.getStates();
+    const peers: Array<{ clientId: number; name: string; color: string; isLocal: boolean }> = [];
+    states.forEach((state, clientId) => {
+      peers.push({
+        clientId,
+        name: state.user?.name || 'Unknown',
+        color: state.user?.color || '#888',
+        isLocal: clientId === this.doc.clientID,
+      });
+    });
+    return {
+      connected: this.connected,
+      synced: this.synced,
+      peerCount: states.size,
+      peers,
+      docSizeBytes: Y.encodeStateAsUpdate(this.doc).byteLength,
+      textLength: this.doc.getText('content').length,
+      clientId: this.doc.clientID,
+      syncMsgSent: this._syncMsgSent,
+      syncMsgReceived: this._syncMsgReceived,
+      awarenessMsgSent: this._awarenessMsgSent,
+      awarenessMsgReceived: this._awarenessMsgReceived,
+      totalSent: this._syncMsgSent + this._awarenessMsgSent,
+      totalReceived: this._syncMsgReceived + this._awarenessMsgReceived,
+    };
+  }
 
   // Callbacks
   onSynced: (() => void) | null = null;
@@ -73,10 +112,102 @@ export class SyncProvider {
   onFileTreeEvent: ((event: { type: string; path: string; new_path?: string }) => void) | null = null;
   // Real-time chat messages broadcast by the server
   onChatMessage: ((message: any) => void) | null = null;
+  // Simulate-offline state change
+  onSimulateOfflineChange: ((info: { offline: boolean; editCount: number }) => void) | null = null;
+  // Fired on reconnect after simulated offline, with merge stats
+  onMergeComplete: ((info: { offlineEdits: number; mergedAt: number }) => void) | null = null;
 
   canSeed(): boolean {
     return this.hasSeedGrant;
   }
+
+  /**
+   * Simulate going offline: closes WebSocket, blocks auto-reconnect.
+   * Local edits continue accumulating in the Y.Doc (Yjs CRDT).
+   * Call simulateReconnect() to re-establish connection and merge.
+   */
+  simulateDisconnect(): void {
+    if (this.simulatedOffline || this.destroyed) return;
+    this.simulatedOffline = true;
+    this.offlineEditCount = 0;
+
+    // Close the existing WebSocket without triggering auto-reconnect
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+    this.connected = false;
+    this.synced = false;
+    this.onStatus?.({ connected: false });
+    this.onSimulateOfflineChange?.({ offline: true, editCount: 0 });
+
+    // Track offline edits for merge feedback
+    this.doc.on('update', this._offlineEditTracker);
+  }
+
+  /**
+   * Reconnect after simulated offline. Yjs sync protocol will automatically
+   * merge all offline edits with the server state (and any concurrent peer edits).
+   */
+  simulateReconnect(): void {
+    if (!this.simulatedOffline || this.destroyed) return;
+    this.simulatedOffline = false;
+    const editCount = this.offlineEditCount;
+
+    // Stop tracking offline edits
+    this.doc.off('update', this._offlineEditTracker);
+
+    // Re-connect — the connect() method sends sync step 1 + step 2,
+    // which pushes all offline Y.Doc changes and pulls all server changes
+    this.connect();
+
+    // Fire merge callback ONLY after verified sync success.
+    // onSynced fires when:
+    //   (a) sync step 2 is received from a peer (real merge), or
+    //   (b) the solitary-client fallback confirms WS is open + no peers (trivial merge)
+    // If connect() fails entirely (ticket rejected, WS never opens), onSynced never fires
+    // and onMergeComplete never fires — no false-positive merge toast.
+    this._pendingMerge = { editCount, timestamp: Date.now() };
+    const origOnSynced = this.onSynced;
+    this.onSynced = () => {
+      if (this._pendingMerge) {
+        this.onMergeComplete?.({ offlineEdits: this._pendingMerge.editCount, mergedAt: Date.now() });
+        this._pendingMerge = null;
+      }
+      this.onSynced = origOnSynced;
+      origOnSynced?.();
+    };
+
+    // Safety: if sync doesn't complete within 15s, clear the pending merge
+    // so the toast doesn't fire stale on a much-later reconnect.
+    setTimeout(() => {
+      if (this._pendingMerge && this._pendingMerge.timestamp === editCount) {
+        this._pendingMerge = null;
+      }
+    }, 15000);
+
+    this.onSimulateOfflineChange?.({ offline: false, editCount });
+  }
+
+  isSimulatedOffline(): boolean {
+    return this.simulatedOffline;
+  }
+
+  getOfflineEditCount(): number {
+    return this.offlineEditCount;
+  }
+
+  private _pendingMerge: { editCount: number; timestamp: number } | null = null;
+
+  private _offlineEditTracker = (_update: Uint8Array, origin: unknown) => {
+    if (origin === this) return; // skip remote echoes
+    this.offlineEditCount++;
+    this.onSimulateOfflineChange?.({ offline: true, editCount: this.offlineEditCount });
+  };
 
   constructor(options: SyncProviderOptions) {
     this.options = options;
@@ -101,6 +232,8 @@ export class SyncProvider {
       encoding.writeVarUint(encoder, MSG_SYNC);
       syncProtocol.writeUpdate(encoder, update);
       this.ws.send(encoding.toUint8Array(encoder));
+      this._syncMsgSent++;
+      this.onInspectorUpdate?.();
 
       // Stream debounced text snapshot over WebSocket for zero-data-loss server persistence
       if (snapshotTimeout) clearTimeout(snapshotTimeout);
@@ -126,6 +259,8 @@ export class SyncProvider {
       encoding.writeVarUint8Array(encoder,
         awarenessProtocol.encodeAwarenessUpdate(this.awareness, changedClients));
       this.ws.send(encoding.toUint8Array(encoder));
+      this._awarenessMsgSent++;
+      this.onInspectorUpdate?.();
     });
 
     this.connect();
@@ -133,6 +268,8 @@ export class SyncProvider {
 
   private async connect() {
     if (this.destroyed) return;
+    // Block reconnect while simulated offline
+    if (this.simulatedOffline) return;
 
     try {
       // Step 1: Request a single-use ticket using httpOnly cookie auth
@@ -172,6 +309,7 @@ export class SyncProvider {
         encoding.writeVarUint(encoder, MSG_SYNC);
         syncProtocol.writeSyncStep1(encoder, this.doc);
         ws.send(encoding.toUint8Array(encoder));
+        this._syncMsgSent++;
 
         // Also send sync step 2 (our full state as an update) so peers get OUR changes.
         // In a relay architecture, step 1 alone only triggers peers to send THEIR diff
@@ -180,6 +318,7 @@ export class SyncProvider {
         encoding.writeVarUint(step2Encoder, MSG_SYNC);
         syncProtocol.writeSyncStep2(step2Encoder, this.doc);
         ws.send(encoding.toUint8Array(step2Encoder));
+        this._syncMsgSent++;
 
         // Broadcast full awareness state
         const awarenessEncoder = encoding.createEncoder();
@@ -187,6 +326,7 @@ export class SyncProvider {
         encoding.writeVarUint8Array(awarenessEncoder,
           awarenessProtocol.encodeAwarenessUpdate(this.awareness, [this.doc.clientID]));
         ws.send(encoding.toUint8Array(awarenessEncoder));
+        this._awarenessMsgSent++;
 
         // Solitary client fallback: In a dumb binary relay architecture, if no peers exist
         // to respond with sync step 2, mark as synced after sending initial vectors.
@@ -255,9 +395,12 @@ export class SyncProvider {
             // 1 = sync step 2 received (initial sync done)
             // 2 = update received
             const msgType = syncProtocol.readSyncMessage(decoder, syncEncoder, this.doc, this);
+            this._syncMsgReceived++;
             if (encoding.length(syncEncoder) > 1) {
               ws.send(encoding.toUint8Array(syncEncoder));
+              this._syncMsgSent++;
             }
+            this.onInspectorUpdate?.();
             // Mark as synced after receiving sync step 2
             if (msgType === 1 && !this.synced) {
               this.synced = true;
@@ -268,6 +411,8 @@ export class SyncProvider {
           case MSG_AWARENESS: {
             const update = decoding.readVarUint8Array(decoder);
             awarenessProtocol.applyAwarenessUpdate(this.awareness, update, this);
+            this._awarenessMsgReceived++;
+            this.onInspectorUpdate?.();
             break;
           }
         }
@@ -302,6 +447,8 @@ export class SyncProvider {
 
   private scheduleReconnect() {
     if (this.destroyed || this.reconnectTimer) return;
+    // Don't auto-reconnect while simulated offline
+    if (this.simulatedOffline) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
@@ -353,6 +500,9 @@ export class SyncProvider {
       this.reconnectTimer = null;
     }
 
+    // Remove offline edit tracker if active
+    this.doc.off('update', this._offlineEditTracker);
+
     // Remove awareness state
     awarenessProtocol.removeAwarenessStates(this.awareness, [this.doc.clientID], this);
 
@@ -365,3 +515,4 @@ export class SyncProvider {
     this.doc.destroy();
   }
 }
+

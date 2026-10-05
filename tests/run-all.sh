@@ -45,6 +45,7 @@ SUITES=(
   "tests/verify-cursors.mjs"
   "tests/test-ai-plant-bug.mjs"
   "tests/test-demo-bot.mjs"
+  "tests/test-simulate-offline.mjs"
 )
 
 TOTAL_PASSED=0

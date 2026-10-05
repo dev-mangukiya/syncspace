@@ -8,14 +8,17 @@ import (
 
 // User represents a registered user
 type User struct {
-	ID           uuid.UUID `json:"id"`
-	Username     string    `json:"username"`
-	Email        string    `json:"email"`
-	PasswordHash string    `json:"-"` // never expose
-	DisplayName  string    `json:"display_name"`
-	AvatarURL    string    `json:"avatar_url"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID              uuid.UUID  `json:"id"`
+	Username        string     `json:"username"`
+	Email           string     `json:"email"`
+	PasswordHash    string     `json:"-"` // never expose
+	DisplayName     string     `json:"display_name"`
+	AvatarURL       string     `json:"avatar_url"`
+	EmailVerified   bool       `json:"email_verified"`
+	OAuthProvider   string     `json:"oauth_provider,omitempty"`  // "google" or empty
+	TermsAcceptedAt *time.Time `json:"terms_accepted_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 // Workspace represents a collaborative code workspace
@@ -131,3 +134,17 @@ type WorkspaceRun struct {
 	CreatedAt   time.Time  `json:"created_at"`
 }
 
+// FileVersion represents a snapshot of file content at a point in time.
+// Kind is one of: "auto" (periodic), "manual" (user-initiated save), "restore" (undo to old version).
+type FileVersion struct {
+	ID          uuid.UUID `json:"id"`
+	FileID      uuid.UUID `json:"file_id"`
+	WorkspaceID uuid.UUID `json:"workspace_id"`
+	Path        string    `json:"path"`
+	Content     string    `json:"content"`
+	AuthorID    uuid.UUID `json:"author_id"`
+	AuthorName  string    `json:"author_name"`
+	Label       string    `json:"label"`
+	Kind        string    `json:"kind"` // "auto" | "manual" | "restore"
+	CreatedAt   time.Time `json:"created_at"`
+}

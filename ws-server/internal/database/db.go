@@ -22,11 +22,20 @@ type DB struct {
 func New(host, port, user, password, dbname string) (*DB, error) {
 	dsn := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
 		host, port, user, password, dbname)
+	return NewFromDSN(dsn, fmt.Sprintf("%s:%s/%s", host, port, dbname))
+}
 
+// NewFromURL creates a connection using a PostgreSQL URL (e.g. from Neon/Render)
+func NewFromURL(databaseURL string) (*DB, error) {
+	return NewFromDSN(databaseURL, "DATABASE_URL")
+}
+
+// NewFromDSN connects to PostgreSQL with retries and connection pool settings
+func NewFromDSN(dsn, label string) (*DB, error) {
 	var db *sql.DB
 	var err error
 
-	// Retry connection — containers may still be starting
+	// Retry connection — containers/remote servers may still be establishing
 	for i := 0; i < 30; i++ {
 		db, err = sql.Open("postgres", dsn)
 		if err == nil {
@@ -34,18 +43,18 @@ func New(host, port, user, password, dbname string) (*DB, error) {
 				break
 			}
 		}
-		log.Printf("Waiting for database... attempt %d/30", i+1)
+		log.Printf("Waiting for database (%s)... attempt %d/30", label, i+1)
 		time.Sleep(2 * time.Second)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect after retries: %w", err)
+		return nil, fmt.Errorf("failed to connect to database (%s) after retries: %w", label, err)
 	}
 
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(5 * time.Minute)
 
-	log.Printf("Database connection established: %s:%s/%s", host, port, dbname)
+	log.Printf("Database connection established: %s", label)
 	return &DB{db}, nil
 }
 

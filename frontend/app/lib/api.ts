@@ -107,6 +107,7 @@ export interface Workspace {
   template: string;
   language: string;
   is_public: boolean;
+  is_demo: boolean;
   created_at: string;
   updated_at: string;
   role?: string;
@@ -201,6 +202,19 @@ export const workspaceAPI = {
 
   sendMessage: (slug: string, content: string) =>
     api.post<WorkspaceChatMessage>(`/api/workspaces/${slug}/messages`, { content }),
+
+  // Version history
+  listVersions: (slug: string, path: string) =>
+    api.get<FileVersion[]>(`/api/workspaces/${slug}/versions`, { params: { path } }),
+
+  createVersion: (slug: string, path: string, content: string, label: string, kind: string = 'manual') =>
+    api.post<FileVersion>(`/api/workspaces/${slug}/versions`, { path, content, label, kind }),
+
+  getVersion: (slug: string, versionId: string) =>
+    api.get<FileVersion>(`/api/workspaces/${slug}/versions/${versionId}`),
+
+  restoreVersion: (slug: string, versionId: string) =>
+    api.post<FileVersion>(`/api/workspaces/${slug}/versions/${versionId}/restore`),
 };
 
 export interface WorkspaceChatMessage {
@@ -211,6 +225,19 @@ export interface WorkspaceChatMessage {
   avatar_url: string;
   color_slot: number;
   content: string;
+  created_at: string;
+}
+
+export interface FileVersion {
+  id: string;
+  file_id: string;
+  workspace_id: string;
+  path: string;
+  content: string;
+  author_id: string;
+  author_name: string;
+  label: string;
+  kind: 'auto' | 'manual' | 'restore';
   created_at: string;
 }
 

@@ -137,6 +137,22 @@ async function main() {
   assert(nonDemoWsRes.data.is_demo === false, 'Confirmed is_demo is false');
   const nonDemoSlug = nonDemoWsRes.data.slug;
 
+  // NEW: Prove is_demo is NOT client-settable — request with is_demo:true is silently ignored
+  const sneakyDemoRes = await api('POST', '/api/workspaces', {
+    name: 'Sneaky Demo Attempt',
+    is_demo: true,
+    template: 'python',
+  }, alice.jar, alice.csrfToken);
+
+  assert(sneakyDemoRes.status === 201, 'is_demo:true in request body was accepted (field is ignored, not rejected)');
+  assert(
+    sneakyDemoRes.data.is_demo === false,
+    `is_demo was silently ignored — workspace has is_demo=${sneakyDemoRes.data.is_demo} (expected false). ` +
+    'Rationale: is_demo is excluded from the request schema; only the owner-only SetDemo endpoint can toggle it.'
+  );
+  // Clean up the sneaky workspace
+  await api('DELETE', `/api/workspaces/${sneakyDemoRes.data.slug}`, null, alice.jar, alice.csrfToken);
+
   // Attempt to invite demo-bot into non-demo workspace
   const inviteRes = await api('POST', `/api/workspaces/${nonDemoSlug}/members`, {
     identifier: 'demo-bot@syncspace.internal',
@@ -175,11 +191,12 @@ async function main() {
   console.log('\n─── 2. SEED-LOCK TEST: Bot As First Joiner ───');
   const demoWsRes = await api('POST', '/api/workspaces', {
     name: 'Demo Seed Lock Room',
-    is_demo: true,
     template: 'python',
   }, alice.jar, alice.csrfToken);
+  // Enable demo mode via owner-only SetDemo endpoint (is_demo is not client-settable at creation)
+  await api('POST', `/api/workspaces/${demoWsRes.data.slug}/demo`, { is_demo: true }, alice.jar, alice.csrfToken);
 
-  assert(demoWsRes.status === 201, 'Created demo workspace with is_demo=true');
+  assert(demoWsRes.status === 201, 'Created workspace then enabled demo via SetDemo endpoint');
   const demoSlug = demoWsRes.data.short_id || demoWsRes.data.slug;
 
   // Bot joins FIRST into the empty room
@@ -255,12 +272,12 @@ async function main() {
   const browser = await chromium.launch(getChromiumLaunchOptions());
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
 
-  // Create clean demo workspace for browser test
+  // Create workspace then enable demo mode via SetDemo endpoint
   const visitorWsRes = await api('POST', '/api/workspaces', {
     name: 'Temperature Bug Demo',
-    is_demo: true,
     template: 'python',
   }, alice.jar, alice.csrfToken);
+  await api('POST', `/api/workspaces/${visitorWsRes.data.slug}/demo`, { is_demo: true }, alice.jar, alice.csrfToken);
 
   const visitorShortId = visitorWsRes.data.short_id;
   console.log(`  Demo workspace created: /w/${visitorShortId}`);
@@ -332,12 +349,12 @@ async function main() {
   console.log('\n─── 4. THREE-PARTY TEST: Bot + Alice + Bob Convergence ───');
   const bob = await signupUser('bob');
 
-  // Create clean demo workspace for three-party test
+  // Create workspace then enable demo mode via SetDemo endpoint
   const triadWsRes = await api('POST', '/api/workspaces', {
     name: 'Three-Party CRDT Convergence Demo',
-    is_demo: true,
     template: 'python',
   }, alice.jar, alice.csrfToken);
+  await api('POST', `/api/workspaces/${triadWsRes.data.slug}/demo`, { is_demo: true }, alice.jar, alice.csrfToken);
 
   const triadShortId = triadWsRes.data.short_id;
 

@@ -9,6 +9,7 @@ import {
   File, Send, Wrench,
   Lightbulb, Zap, TestTube2, Loader2, Plus, Trash2, Eraser,
   Users, Command, Columns2, Folder, Hash, Moon, Sun, MessageSquare,
+  Wifi, WifiOff, Activity, History,
 } from 'lucide-react';
 import { useAuthStore } from '@/app/lib/store';
 import { workspaceAPI, FileEntry, Workspace } from '@/app/lib/api';
@@ -24,6 +25,8 @@ import { CommandPalette, PaletteAction } from '@/app/components/workspace/comman
 import { ShareModal } from '@/app/components/workspace/share-modal';
 import { WorkspaceChat } from '@/app/components/workspace/workspace-chat';
 import { OutputPanel } from '@/app/components/workspace/output-panel';
+import { SyncInspector } from '@/app/components/workspace/sync-inspector';
+import { VersionHistory } from '@/app/components/workspace/version-history';
 import axios from 'axios';
 
 const Editor = dynamic(() => import('@monaco-editor/react'), { ssr: false });
@@ -146,6 +149,15 @@ interface ActivePeer {
   const [editorContent, setEditorContent] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+
+  // Simulate-offline state (dev/demo toggle)
+  const [simulatedOffline, setSimulatedOffline] = useState(false);
+  const [offlineEditCount, setOfflineEditCount] = useState(0);
+  const [mergeToast, setMergeToast] = useState<{ edits: number; timestamp: number } | null>(null);
+
+  // Inspector panel state (dev/demo-only)
+  const [showInspector, setShowInspector] = useState(false);
+  const [showVersionHistory, setShowVersionHistory] = useState(false);
 
   // Execution state (Phase D)
   const [isRunning, setIsRunning] = useState(false);
@@ -353,6 +365,17 @@ interface ActivePeer {
           workspaceAPI.listFiles(slug).then(res => setFiles(res.data)).catch(() => {});
           break;
       }
+    };
+
+    // Simulate-offline callbacks
+    provider.onSimulateOfflineChange = (info) => {
+      setSimulatedOffline(info.offline);
+      setOfflineEditCount(info.editCount);
+    };
+    provider.onMergeComplete = (info) => {
+      setMergeToast({ edits: info.offlineEdits, timestamp: info.mergedAt });
+      // Auto-dismiss after 5 seconds
+      setTimeout(() => setMergeToast(null), 5000);
     };
 
     // Bind to Monaco if editor already mounted
@@ -1069,6 +1092,22 @@ interface ActivePeer {
             )}
           </button>
 
+          {/* Version History toggle — available to ALL users (real feature, not dev-only) */}
+          {activeFile && (
+            <button
+              id="version-history-toggle"
+              onClick={() => setShowVersionHistory(!showVersionHistory)}
+              className="btn btn-ghost btn-sm"
+              style={{
+                background: showVersionHistory ? 'var(--color-accent-subtle)' : undefined,
+                color: showVersionHistory ? 'var(--color-accent)' : undefined,
+              }}
+              title="Version History — save, compare, and restore file snapshots"
+            >
+              <History size={14} /> History
+            </button>
+          )}
+
           <div style={{ width: '1px', height: '16px', background: 'var(--color-border)' }} />
 
           {/* Command Palette button */}
@@ -1550,6 +1589,55 @@ interface ActivePeer {
           currentUsername={user?.username}
           onClose={() => setShowChat(false)}
         />
+
+        {/* ─── Version History Panel ─── */}
+        {showVersionHistory && activeFile && (
+          <div style={{
+            width: '340px', flexShrink: 0, height: '100%',
+            borderLeft: '1px solid var(--color-border)',
+            overflow: 'hidden',
+          }}>
+            <VersionHistory
+              slug={slug}
+              filePath={activeFile.path}
+              currentContent={(() => {
+                // FIX 2 (SAVE VERSION SOURCE): Read live Y.Doc state directly,
+                // not stale Postgres content. This ensures "Save Version" before
+                // debounce flush captures the actual editor content.
+                const provider = tabManager.getProvider(activeFile.path);
+                if (provider) return provider.getText().toString();
+                // Fallback: read from Monaco if no provider
+                if (typeof window !== 'undefined' && (window as any).monaco) {
+                  const models = (window as any).monaco.editor.getModels();
+                  if (models?.[0]) return models[0].getValue();
+                }
+                return activeFile.content;
+              })()}
+              onRestore={(content) => {
+                // FIX 1 (RESTORE VS LIVE Y.DOC): Inject restored content as a
+                // real CRDT operation into the live Y.Doc. This ensures:
+                // - The local Monaco editor updates immediately via the Y.Doc binding
+                // - All other connected clients receive the change via normal sync
+                // - The debounce flush will persist the restored content (not revert it)
+                const provider = tabManager.getProvider(activeFile.path);
+                if (provider) {
+                  const ytext = provider.getText();
+                  provider.doc.transact(() => {
+                    ytext.delete(0, ytext.length);
+                    ytext.insert(0, content);
+                  }, 'restore');
+                } else {
+                  // Fallback: set Monaco model directly (won't sync to other clients)
+                  if (typeof window !== 'undefined' && (window as any).monaco) {
+                    const model = (window as any).monaco.editor.getModels()[0];
+                    if (model) model.setValue(content);
+                  }
+                }
+              }}
+              onClose={() => setShowVersionHistory(false)}
+            />
+          </div>
+        )}
       </div>
 
       {/* ─── Status Bar ─── */}
@@ -1592,6 +1680,61 @@ interface ActivePeer {
             <span>
               {tabManager.tabState.openTabs.length} tab{tabManager.tabState.openTabs.length > 1 ? 's' : ''} open
             </span>
+          )}
+
+          {/* Simulate Offline toggle — dev/demo-only, never visible in production regular workspaces */}
+          {activeFile && (process.env.NODE_ENV !== 'production' || workspace?.is_demo) && (
+            <button
+              id="simulate-offline-toggle"
+              onClick={() => {
+                const activePath = tabManager.tabState.activeTabPath;
+                if (!activePath) return;
+                const provider = tabManager.getProvider(activePath);
+                if (!provider) return;
+                if (provider.isSimulatedOffline()) {
+                  provider.simulateReconnect();
+                } else {
+                  provider.simulateDisconnect();
+                }
+              }}
+              style={{
+                display: 'flex', alignItems: 'center', gap: '4px',
+                background: simulatedOffline ? 'rgba(239, 68, 68, 0.15)' : 'rgba(16, 185, 129, 0.1)',
+                border: `1px solid ${simulatedOffline ? '#EF4444' : 'transparent'}`,
+                borderRadius: '4px', padding: '1px 6px',
+                color: simulatedOffline ? '#EF4444' : 'var(--color-text-faint)',
+                fontSize: '10px', fontWeight: 600, cursor: 'pointer',
+                transition: 'all 0.2s ease',
+              }}
+              title={simulatedOffline
+                ? `Simulated Offline Mode — ${offlineEditCount} local edit(s) pending. Click to reconnect and merge.`
+                : 'Click to simulate going offline (WebSocket disconnects, local edits continue, reconnect merges via CRDT)'
+              }
+            >
+              {simulatedOffline ? <WifiOff size={11} /> : <Wifi size={11} />}
+              <span>{simulatedOffline ? `Offline (${offlineEditCount} edits)` : 'Online'}</span>
+            </button>
+          )}
+
+          {/* Sync Inspector toggle — dev/demo-only, same gating as simulate-offline */}
+          {activeFile && (process.env.NODE_ENV !== 'production' || workspace?.is_demo) && (
+            <button
+              id="sync-inspector-toggle"
+              onClick={() => setShowInspector(prev => !prev)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: '4px',
+                background: showInspector ? 'rgba(107, 91, 149, 0.15)' : 'transparent',
+                border: `1px solid ${showInspector ? 'rgba(107, 91, 149, 0.4)' : 'transparent'}`,
+                borderRadius: '4px', padding: '1px 6px',
+                color: showInspector ? '#6B5B95' : 'var(--color-text-faint)',
+                fontSize: '10px', fontWeight: 600, cursor: 'pointer',
+                transition: 'all 0.2s ease',
+              }}
+              title="Toggle Sync Inspector — shows real-time peer count, Y.Doc state, and WS message counters"
+            >
+              <Activity size={11} />
+              <span>Inspector</span>
+            </button>
           )}
         </div>
 
@@ -1647,6 +1790,40 @@ interface ActivePeer {
         </div>
       </footer>
 
+      {/* ─── Merge Notification Toast ─── */}
+      {mergeToast && (
+        <div
+          id="merge-toast"
+          style={{
+            position: 'fixed', bottom: '40px', right: '20px', zIndex: 9999,
+            display: 'flex', alignItems: 'center', gap: '8px',
+            padding: '10px 16px', borderRadius: '8px',
+            background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.95), rgba(5, 150, 105, 0.95))',
+            color: 'white', fontSize: '13px', fontWeight: 500,
+            boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
+            animation: 'slideInRight 0.3s ease',
+          }}
+        >
+          <Check size={16} style={{ flexShrink: 0 }} />
+          <div>
+            <div style={{ fontWeight: 700 }}>CRDT Merge Complete</div>
+            <div style={{ fontSize: '11px', opacity: 0.9 }}>
+              {mergeToast.edits} offline edit{mergeToast.edits !== 1 ? 's' : ''} merged successfully with server state.
+              Both sides now hold identical content.
+            </div>
+          </div>
+          <button
+            onClick={() => setMergeToast(null)}
+            style={{
+              background: 'none', border: 'none', color: 'white',
+              cursor: 'pointer', padding: '2px', opacity: 0.7,
+            }}
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
       {/* ─── Command Palette Modal ─── */}
       <CommandPalette
         isOpen={showCommandPalette}
@@ -1661,6 +1838,14 @@ interface ActivePeer {
         slug={slug}
         currentUserId={user?.id}
       />
+
+      {/* ─── Sync Inspector Panel ─── */}
+      {showInspector && (process.env.NODE_ENV !== 'production' || workspace?.is_demo) && (
+        <SyncInspector
+          provider={tabManager.tabState.activeTabPath ? tabManager.getProvider(tabManager.tabState.activeTabPath) : null}
+          onClose={() => setShowInspector(false)}
+        />
+      )}
     </div>
   );
 }

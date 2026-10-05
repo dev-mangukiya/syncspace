@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/syncspace/ws-server/internal/models"
@@ -16,29 +17,37 @@ func (db *DB) CreateUser(username, email, passwordHash string) (*models.User, er
 	err := db.QueryRow(`
 		INSERT INTO users (username, email, password_hash, display_name)
 		VALUES ($1, $2, $3, $1)
-		RETURNING id, username, email, password_hash, COALESCE(display_name,''), COALESCE(avatar_url,''), created_at, updated_at
+		RETURNING id, username, email, password_hash, COALESCE(display_name,''), COALESCE(avatar_url,''),
+		          email_verified, COALESCE(oauth_provider,''), terms_accepted_at, created_at, updated_at
 	`, username, email, passwordHash).Scan(
 		&user.ID, &user.Username, &user.Email, &user.PasswordHash,
-		&user.DisplayName, &user.AvatarURL, &user.CreatedAt, &user.UpdatedAt)
+		&user.DisplayName, &user.AvatarURL,
+		&user.EmailVerified, &user.OAuthProvider, &user.TermsAcceptedAt, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("create user: %w", err)
 	}
 	return user, nil
 }
 
+// userSelectCols is the standard column list for user queries
+const userSelectCols = `id, username, email, password_hash, COALESCE(display_name,''), COALESCE(avatar_url,''),
+	email_verified, COALESCE(oauth_provider,''), terms_accepted_at, created_at, updated_at`
+
+func scanUser(row interface{ Scan(dest ...interface{}) error }, user *models.User) error {
+	return row.Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash,
+		&user.DisplayName, &user.AvatarURL,
+		&user.EmailVerified, &user.OAuthProvider, &user.TermsAcceptedAt, &user.CreatedAt, &user.UpdatedAt)
+}
+
 // GetUserByEmail retrieves a user by email, including password hash for auth
 func (db *DB) GetUserByEmail(email string) (*models.User, error) {
 	user := &models.User{}
-	err := db.QueryRow(`
-		SELECT id, username, email, password_hash, COALESCE(display_name,''), COALESCE(avatar_url,''), created_at, updated_at
-		FROM users WHERE email = $1
-	`, email).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash,
-		&user.DisplayName, &user.AvatarURL, &user.CreatedAt, &user.UpdatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get user by email: %w", err)
+	err := db.QueryRow(`SELECT `+userSelectCols+` FROM users WHERE email = $1`, email)
+	if e := scanUser(err, user); e != nil {
+		if e == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get user by email: %w", e)
 	}
 	return user, nil
 }
@@ -46,16 +55,12 @@ func (db *DB) GetUserByEmail(email string) (*models.User, error) {
 // GetUserByID retrieves a user by ID
 func (db *DB) GetUserByID(id uuid.UUID) (*models.User, error) {
 	user := &models.User{}
-	err := db.QueryRow(`
-		SELECT id, username, email, password_hash, COALESCE(display_name,''), COALESCE(avatar_url,''), created_at, updated_at
-		FROM users WHERE id = $1
-	`, id).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash,
-		&user.DisplayName, &user.AvatarURL, &user.CreatedAt, &user.UpdatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get user by id: %w", err)
+	err := db.QueryRow(`SELECT `+userSelectCols+` FROM users WHERE id = $1`, id)
+	if e := scanUser(err, user); e != nil {
+		if e == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get user by id: %w", e)
 	}
 	return user, nil
 }
@@ -63,18 +68,89 @@ func (db *DB) GetUserByID(id uuid.UUID) (*models.User, error) {
 // GetUserByUsername retrieves a user by username
 func (db *DB) GetUserByUsername(username string) (*models.User, error) {
 	user := &models.User{}
-	err := db.QueryRow(`
-		SELECT id, username, email, password_hash, COALESCE(display_name,''), COALESCE(avatar_url,''), created_at, updated_at
-		FROM users WHERE username = $1
-	`, username).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash,
-		&user.DisplayName, &user.AvatarURL, &user.CreatedAt, &user.UpdatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get user by username: %w", err)
+	err := db.QueryRow(`SELECT `+userSelectCols+` FROM users WHERE username = $1`, username)
+	if e := scanUser(err, user); e != nil {
+		if e == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get user by username: %w", e)
 	}
 	return user, nil
+}
+
+// ── Email Verification ──────────────────────────────────────
+
+// SetEmailVerifyToken stores a verification token for a user
+func (db *DB) SetEmailVerifyToken(userID uuid.UUID, token string, expires time.Time) error {
+	_, err := db.Exec(`UPDATE users SET email_verify_token = $1, email_verify_expires = $2 WHERE id = $3`,
+		token, expires, userID)
+	return err
+}
+
+// GetUserByVerifyToken finds a user by their email verification token
+func (db *DB) GetUserByVerifyToken(token string) (*models.User, error) {
+	user := &models.User{}
+	row := db.QueryRow(`SELECT `+userSelectCols+` FROM users WHERE email_verify_token = $1 AND email_verify_expires > NOW()`, token)
+	if e := scanUser(row, user); e != nil {
+		if e == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get user by verify token: %w", e)
+	}
+	return user, nil
+}
+
+// SetEmailVerified marks a user's email as verified and clears the token
+func (db *DB) SetEmailVerified(userID uuid.UUID) error {
+	_, err := db.Exec(`UPDATE users SET email_verified = true, email_verify_token = NULL, email_verify_expires = NULL WHERE id = $1`, userID)
+	return err
+}
+
+// ── OAuth ────────────────────────────────────────────────────
+
+// CreateOAuthUser creates a user from OAuth (no password, email pre-verified)
+func (db *DB) CreateOAuthUser(username, email, provider, providerID, displayName, avatarURL string) (*models.User, error) {
+	user := &models.User{}
+	err := db.QueryRow(`
+		INSERT INTO users (username, email, password_hash, display_name, avatar_url, email_verified, oauth_provider, oauth_provider_id, terms_accepted_at)
+		VALUES ($1, $2, '', $3, $4, true, $5, $6, NOW())
+		RETURNING `+userSelectCols,
+		username, email, displayName, avatarURL, provider, providerID).Scan(
+		&user.ID, &user.Username, &user.Email, &user.PasswordHash,
+		&user.DisplayName, &user.AvatarURL,
+		&user.EmailVerified, &user.OAuthProvider, &user.TermsAcceptedAt, &user.CreatedAt, &user.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("create oauth user: %w", err)
+	}
+	return user, nil
+}
+
+// GetUserByOAuth finds a user by OAuth provider and provider-specific ID
+func (db *DB) GetUserByOAuth(provider, providerID string) (*models.User, error) {
+	user := &models.User{}
+	row := db.QueryRow(`SELECT `+userSelectCols+` FROM users WHERE oauth_provider = $1 AND oauth_provider_id = $2`, provider, providerID)
+	if e := scanUser(row, user); e != nil {
+		if e == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get user by oauth: %w", e)
+	}
+	return user, nil
+}
+
+// LinkOAuth links an OAuth identity to an existing user
+func (db *DB) LinkOAuth(userID uuid.UUID, provider, providerID string) error {
+	_, err := db.Exec(`UPDATE users SET oauth_provider = $1, oauth_provider_id = $2, email_verified = true WHERE id = $3`,
+		provider, providerID, userID)
+	return err
+}
+
+// ── Terms ────────────────────────────────────────────────────
+
+// AcceptTerms records that the user accepted terms of service
+func (db *DB) AcceptTerms(userID uuid.UUID) error {
+	_, err := db.Exec(`UPDATE users SET terms_accepted_at = NOW() WHERE id = $1`, userID)
+	return err
 }
 
 // CreateWorkspace creates a new workspace and adds the owner as a member.
@@ -192,6 +268,8 @@ func (db *DB) ListUserWorkspaces(userID uuid.UUID) ([]models.WorkspaceWithRole, 
 }
 
 // EnsureDemoBotUser checks if the demo-bot account exists and creates it if missing.
+// Race-safe: if two instances race on first startup, the loser's INSERT fails on the
+// unique constraint and we re-fetch the winner's row instead of returning an error.
 func (db *DB) EnsureDemoBotUser(password string) (*models.User, error) {
 	user, err := db.GetUserByEmail("demo-bot@syncspace.internal")
 	if err == nil && user != nil {
@@ -201,7 +279,17 @@ func (db *DB) EnsureDemoBotUser(password string) (*models.User, error) {
 	if err != nil {
 		return nil, fmt.Errorf("hash bot password: %w", err)
 	}
-	return db.CreateUser("demo-bot", "demo-bot@syncspace.internal", string(hash))
+	user, err = db.CreateUser("demo-bot", "demo-bot@syncspace.internal", string(hash))
+	if err != nil {
+		// Unique constraint violation — another instance won the race.
+		// Re-fetch and return the existing row.
+		user, fetchErr := db.GetUserByEmail("demo-bot@syncspace.internal")
+		if fetchErr == nil && user != nil {
+			return user, nil
+		}
+		return nil, fmt.Errorf("create demo bot user: %w (re-fetch also failed: %v)", err, fetchErr)
+	}
+	return user, nil
 }
 
 // SetWorkspaceDemo toggles a workspace's is_demo flag and enrolls demo-bot as editor if true.

@@ -10,6 +10,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/syncspace/ws-server/internal/auth"
 	"github.com/syncspace/ws-server/internal/database"
 	"github.com/syncspace/ws-server/internal/models"
 	"github.com/syncspace/ws-server/internal/realtime"
@@ -89,7 +91,8 @@ type createWorkspaceRequest struct {
 	Description string `json:"description"`
 	Template    string `json:"template"`
 	Language    string `json:"language"`
-	IsDemo      bool   `json:"is_demo"`
+	// is_demo is intentionally excluded — it must not be client-settable.
+	// Only the owner-only SetDemo endpoint (or server-side seeding) can toggle it.
 }
 
 // Create creates a new workspace
@@ -115,12 +118,7 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Template == "" {
-		if req.IsDemo {
-			req.Template = "python"
-			req.Language = "python"
-		} else {
-			req.Template = "blank"
-		}
+		req.Template = "blank"
 	}
 	if req.Language == "" {
 		req.Language = "javascript"
@@ -137,7 +135,8 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		slug = fmt.Sprintf("%s-%d", baseSlug, i)
 	}
 
-	ws, err := h.db.CreateWorkspace(req.Name, slug, req.Description, claims.UserID, req.Template, req.Language, req.IsDemo)
+	// is_demo is always false at creation time — only SetDemo can enable it
+	ws, err := h.db.CreateWorkspace(req.Name, slug, req.Description, claims.UserID, req.Template, req.Language, false)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create workspace"})
 		return
@@ -271,6 +270,7 @@ func (h *WorkspaceHandler) UpdateFile(w http.ResponseWriter, r *http.Request) {
 	if ws == nil {
 		return
 	}
+	claims := getClaims(r)
 
 	var req struct {
 		Path    string `json:"path"`
@@ -285,6 +285,11 @@ func (h *WorkspaceHandler) UpdateFile(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path is required"})
 		return
 	}
+
+	// FIX 4 (AUTO SNAPSHOT): Snapshot the PREVIOUS content before overwriting.
+	// This gives the last-write-wins data loss bug a recovery path:
+	// a silently-overwritten edit still exists as a restorable version.
+	h.autoSnapshotPrevious(ws.ID, req.Path, req.Content, claims)
 
 	file, err := h.db.UpdateFileContent(ws.ID, req.Path, req.Content)
 	if err != nil {
@@ -304,6 +309,7 @@ func (h *WorkspaceHandler) BeaconPersist(w http.ResponseWriter, r *http.Request)
 	if ws == nil {
 		return
 	}
+	claims := getClaims(r)
 
 	var req struct {
 		Path    string `json:"path"`
@@ -318,6 +324,9 @@ func (h *WorkspaceHandler) BeaconPersist(w http.ResponseWriter, r *http.Request)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
+
+	// Auto-snapshot before overwriting (same as UpdateFile)
+	h.autoSnapshotPrevious(ws.ID, req.Path, req.Content, claims)
 
 	// Best-effort persist — errors are swallowed since the tab is closing
 	h.db.UpdateFileContent(ws.ID, req.Path, req.Content)
@@ -654,4 +663,39 @@ if __name__ == '__main__':
 	}
 
 	return nil
+}
+
+// autoSnapshotPrevious snapshots the PREVIOUS file content before a new version
+// overwrites it. Only creates a snapshot if the content actually differs.
+// This is the recovery path for the known last-write-wins data loss bug:
+// a silently-overwritten edit still exists as a restorable 'auto' version.
+func (h *WorkspaceHandler) autoSnapshotPrevious(workspaceID uuid.UUID, path, newContent string, claims *auth.Claims) {
+	if claims == nil {
+		return
+	}
+
+	// Get the current file content from DB (before overwrite)
+	existing, err := h.db.GetFile(workspaceID, path)
+	if err != nil || existing == nil {
+		return // File doesn't exist yet — nothing to snapshot
+	}
+
+	// Only snapshot if content actually changed
+	if existing.Content == newContent {
+		return
+	}
+
+	// Don't snapshot empty files
+	if existing.Content == "" {
+		return
+	}
+
+	// Look up author name
+	authorName := ""
+	if user, err := h.db.GetUserByID(claims.UserID); err == nil {
+		authorName = user.Username
+	}
+
+	// Create auto snapshot of the PREVIOUS content
+	h.db.CreateFileVersion(workspaceID, existing.ID, claims.UserID, path, existing.Content, authorName, "", "auto")
 }

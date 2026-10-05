@@ -568,6 +568,11 @@ a:hover {
   to { opacity: 1; transform: translateY(0); }
 }
 
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(100px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
 .animate-fade-in {
   animation: fade-in var(--duration-normal) var(--easing) forwards;
 }

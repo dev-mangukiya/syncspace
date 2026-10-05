@@ -34,6 +34,8 @@ func main() {
 	env := getEnv("ENV", "development")
 	execURL := getEnv("EXEC_SERVICE_URL", "http://host.docker.internal:8081")
 	execSecret := getEnv("EXEC_SERVICE_SECRET", "")
+	cfAccessClientID := getEnv("CF_ACCESS_CLIENT_ID", "")
+	cfAccessClientSecret := getEnv("CF_ACCESS_CLIENT_SECRET", "")
 
 	// ── Env validation ───────────────────────────────────────────
 	// Refuse to start in production with default/weak JWT secret
@@ -55,15 +57,23 @@ func main() {
 	}
 
 	// PostgreSQL configuration
-	dbHost := getEnv("POSTGRES_HOST", "localhost")
-	dbPort := getEnv("POSTGRES_PORT", "5432")
-	dbUser := getEnv("POSTGRES_USER", "syncspace")
-	dbPass := getEnv("POSTGRES_PASSWORD", "syncspace_dev")
-	dbName := getEnv("POSTGRES_DB", "syncspace")
+	databaseURL := getEnv("DATABASE_URL", "")
 	migrationsDir := getEnv("MIGRATIONS_DIR", "./migrations")
 
-	// Connect to database (with retry for Docker startup)
-	db, err := database.New(dbHost, dbPort, dbUser, dbPass, dbName)
+	var db *database.DB
+	var err error
+
+	if databaseURL != "" {
+		log.Println("Connecting to PostgreSQL using DATABASE_URL...")
+		db, err = database.NewFromURL(databaseURL)
+	} else {
+		dbHost := getEnv("POSTGRES_HOST", "localhost")
+		dbPort := getEnv("POSTGRES_PORT", "5432")
+		dbUser := getEnv("POSTGRES_USER", "syncspace")
+		dbPass := getEnv("POSTGRES_PASSWORD", "syncspace_dev")
+		dbName := getEnv("POSTGRES_DB", "syncspace")
+		db, err = database.New(dbHost, dbPort, dbUser, dbPass, dbName)
+	}
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
@@ -75,8 +85,16 @@ func main() {
 		log.Fatalf("Failed to run migrations: %v", err)
 	}
 
-	// Ensure demo bot user exists
-	if _, err := db.EnsureDemoBotUser("DemoBotSecret2026!"); err != nil {
+	// Ensure demo bot user exists (password from env, consistent with other secrets)
+	demoBotPassword := getEnv("DEMO_BOT_PASSWORD", "DemoBotSecret2026!")
+	if env == "production" {
+		if demoBotPassword == "DemoBotSecret2026!" || len(demoBotPassword) < 16 {
+			log.Fatal("FATAL: DEMO_BOT_PASSWORD must be set to a strong secret (>= 16 chars) in production")
+		}
+	} else if demoBotPassword == "DemoBotSecret2026!" {
+		log.Println("WARNING: DEMO_BOT_PASSWORD unset, using default dev password")
+	}
+	if _, err := db.EnsureDemoBotUser(demoBotPassword); err != nil {
 		log.Printf("[DEMO-BOT] Warning: failed to ensure demo bot user: %v", err)
 	}
 
@@ -118,6 +136,11 @@ func main() {
 	chatHandler := handlers.NewChatHandler(db, hub)
 	aiHandler := handlers.NewAIHandler()
 	runHandler := handlers.NewRunHandler(db, hub, execURL, execSecret)
+	if cfAccessClientID != "" && cfAccessClientSecret != "" {
+		runHandler.SetCloudflareAccess(cfAccessClientID, cfAccessClientSecret)
+		log.Println("INFO: Cloudflare Access Service Token configured for exec-service requests")
+	}
+	versionHandler := handlers.NewVersionHandler(db)
 
 	// Build router
 	r := chi.NewRouter()
@@ -200,6 +223,12 @@ func main() {
 			r.Post("/{slug}/run", runHandler.Run)
 			r.Post("/{slug}/run/cancel", runHandler.Cancel)
 			r.Get("/{slug}/runs", runHandler.ListRuns)
+
+			// File version history (snapshots, diff, restore)
+			r.Get("/{slug}/versions", versionHandler.ListVersions)
+			r.Post("/{slug}/versions", versionHandler.CreateVersion)
+			r.Get("/{slug}/versions/{versionId}", versionHandler.GetVersion)
+			r.Post("/{slug}/versions/{versionId}/restore", versionHandler.RestoreVersion)
 		})
 
 		// AI assistant (rate-limited per IP)
