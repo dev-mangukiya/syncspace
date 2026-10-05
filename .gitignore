@@ -3,17 +3,16 @@
 !.env.example
 
 # Dependencies
-node_modules/
-*/node_modules/
-vendor/
+**/node_modules
+**/node_modules/**
+**/vendor/
 
 # Build artifacts
-.next/
-*/.next/
-out/
-dist/
-bin/
-*/bin/
+**/.next/
+**/.next/**
+**/out/
+**/dist/
+**/bin/
 
 # Test artifacts, reports, and generated test screenshots
 tests/*.png
