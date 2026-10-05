@@ -175,6 +175,7 @@ func main() {
 
 	// Public routes
 	r.Get("/health", healthHandler.Health)
+	r.Head("/health", healthHandler.Health)
 	r.Get("/api/ai/info", aiHandler.Info)
 	r.Get("/api/exec/limits", runHandler.GetLimits)
 
