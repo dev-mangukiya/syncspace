@@ -153,8 +153,14 @@ func main() {
 	r.Use(middleware.SecurityHeaders) // Security headers on every response
 
 	// Parse CORS origins
-	allowedOrigins := []string{corsOrigin}
-	if corsOrigin != "http://localhost:3000" {
+	var allowedOrigins []string
+	for _, o := range strings.Split(corsOrigin, ",") {
+		o = strings.TrimSpace(o)
+		if o != "" {
+			allowedOrigins = append(allowedOrigins, o)
+		}
+	}
+	if len(allowedOrigins) == 0 {
 		allowedOrigins = append(allowedOrigins, "http://localhost:3000")
 	}
 
