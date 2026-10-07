@@ -64,8 +64,9 @@ type loginRequest struct {
 // authResponse no longer contains the JWT token — it's in an httpOnly cookie.
 // The response body only contains user info and a CSRF token (readable by JS).
 type authResponse struct {
-	User      interface{} `json:"user"`
-	CSRFToken string      `json:"csrf_token"`
+	User             interface{} `json:"user"`
+	CSRFToken        string      `json:"csrf_token"`
+	VerificationLink string      `json:"verification_link,omitempty"`
 }
 
 var (
@@ -243,6 +244,7 @@ func (h *AuthHandler) Signup(w http.ResponseWriter, r *http.Request) {
 	_ = h.db.AcceptTerms(user.ID)
 
 	// Generate email verification token (24-hour expiration)
+	var verifyURL string
 	verifyBytes := make([]byte, 32)
 	if _, err := rand.Read(verifyBytes); err == nil {
 		verifyToken := hex.EncodeToString(verifyBytes)
@@ -255,8 +257,8 @@ func (h *AuthHandler) Signup(w http.ResponseWriter, r *http.Request) {
 		if baseURL == "" {
 			baseURL = "https://syncspace-bay.vercel.app"
 		}
-		verifyURL := fmt.Sprintf("%s/api/auth/verify-email?token=%s&redirect=true", baseURL, verifyToken)
-		if h.emailService != nil {
+		verifyURL = fmt.Sprintf("%s/api/auth/verify-email?token=%s&redirect=true", baseURL, verifyToken)
+		if h.emailService != nil && h.emailService.IsConfigured() {
 			go func(to, username, url string) {
 				if err := h.emailService.SendVerificationEmail(to, username, url); err != nil {
 					log.Printf("[AUTH] Failed to send verification email to %s: %v", to, err)
@@ -272,7 +274,13 @@ func (h *AuthHandler) Signup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, authResponse{User: user, CSRFToken: csrfToken})
+	resp := authResponse{User: user, CSRFToken: csrfToken}
+	// If email service is not configured on the server, include verification link directly so users/tests can complete verification
+	if h.emailService == nil || !h.emailService.IsConfigured() {
+		resp.VerificationLink = verifyURL
+	}
+
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 // Login handles user authentication
@@ -511,9 +519,13 @@ func (h *AuthHandler) ResendVerification(w http.ResponseWriter, r *http.Request)
 		}(user.Email, user.Username, verifyURL)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{
+	respData := map[string]string{
 		"message": "verification email sent",
-	})
+	}
+	if h.emailService == nil || !h.emailService.IsConfigured() {
+		respData["verification_link"] = verifyURL
+	}
+	writeJSON(w, http.StatusOK, respData)
 }
 
 // ConfigStatus reports configuration health without leaking secret values
