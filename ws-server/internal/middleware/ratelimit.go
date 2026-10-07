@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,12 +76,15 @@ func (rl *RateLimiter) allow(ip string) bool {
 // Middleware returns an HTTP middleware that rate-limits by client IP.
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Use X-Forwarded-For if behind proxy, fall back to RemoteAddr
+		// Extract real client IP (split X-Forwarded-For if comma-separated list from proxy)
 		ip := r.Header.Get("X-Forwarded-For")
-		if ip == "" {
-			ip = r.Header.Get("X-Real-IP")
-		}
-		if ip == "" {
+		if ip != "" {
+			if comma := strings.Index(ip, ","); comma != -1 {
+				ip = strings.TrimSpace(ip[:comma])
+			}
+		} else if rip := r.Header.Get("X-Real-IP"); rip != "" {
+			ip = rip
+		} else {
 			ip = r.RemoteAddr
 		}
 

@@ -598,10 +598,10 @@ interface ActivePeer {
       }
     } catch (err: unknown) {
       if (axios.isAxiosError(err)) {
-        const errorMsg = err.response?.data?.error || err.message;
+        const errorMsg = err.response?.data?.message || err.response?.data?.error || err.message;
         setError(errorMsg);
-        setTimeout(() => setError(''), 4000);
-        setActiveRunOutput(prev => prev ? prev + `\n[Error: ${errorMsg}]\n` : `[Error: ${errorMsg}]\n`);
+        setTimeout(() => setError(''), 5000);
+        setActiveRunOutput(prev => prev ? prev + `\n[Execution blocked: ${errorMsg}]\n` : `[Execution blocked: ${errorMsg}]\n`);
         setLastRunResult({
           exitCode: -1,
           durationMs: 0,

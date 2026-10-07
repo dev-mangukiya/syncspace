@@ -142,8 +142,14 @@ export interface Member {
 
 // Auth API
 export const authAPI = {
-  signup: (username: string, email: string, password: string) =>
-    api.post<AuthResponse>('/api/auth/signup', { username, email, password }),
+  signup: (username: string, email: string, password: string, turnstileToken?: string, termsAccepted: boolean = true) =>
+    api.post<AuthResponse>('/api/auth/signup', {
+      username,
+      email,
+      password,
+      turnstile_token: turnstileToken,
+      terms_accepted: termsAccepted,
+    }),
 
   login: (identifier: string, password: string) =>
     api.post<AuthResponse>('/api/auth/login', { identifier, password }),

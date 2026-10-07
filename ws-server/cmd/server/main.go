@@ -36,6 +36,10 @@ func main() {
 	execSecret := getEnv("EXEC_SERVICE_SECRET", "")
 	cfAccessClientID := getEnv("CF_ACCESS_CLIENT_ID", "")
 	cfAccessClientSecret := getEnv("CF_ACCESS_CLIENT_SECRET", "")
+	turnstileSecretKey := getEnv("TURNSTILE_SECRET_KEY", "1x0000000000000000000000000000000AA")
+	googleClientID := getEnv("GOOGLE_CLIENT_ID", "")
+	googleClientSecret := getEnv("GOOGLE_CLIENT_SECRET", "")
+	googleRedirectURI := getEnv("GOOGLE_REDIRECT_URI", "")
 
 	// ── Env validation ───────────────────────────────────────────
 	// Refuse to start in production with default/weak JWT secret
@@ -130,7 +134,13 @@ func main() {
 
 	// Initialize handlers
 	healthHandler := handlers.NewHealthHandler()
-	authHandler := handlers.NewAuthHandler(db, authService)
+	authHandler := handlers.NewAuthHandler(db, authService, handlers.AuthConfig{
+		GoogleClientID:     googleClientID,
+		GoogleClientSecret: googleClientSecret,
+		GoogleRedirectURI:  googleRedirectURI,
+		TurnstileSecretKey: turnstileSecretKey,
+		SecureCookie:       secureCookie,
+	})
 	workspaceHandler := handlers.NewWorkspaceHandler(db, hub)
 	membersHandler := handlers.NewMembersHandler(db)
 	chatHandler := handlers.NewChatHandler(db, hub)
@@ -185,6 +195,10 @@ func main() {
 		r.Post("/signup", authHandler.Signup)
 		r.Post("/login", authHandler.Login)
 		r.Post("/refresh", authHandler.Refresh)
+		r.Get("/verify-email", authHandler.VerifyEmail)
+		r.Post("/verify-email", authHandler.VerifyEmail)
+		r.Get("/google", authHandler.GoogleLogin)
+		r.Get("/google/callback", authHandler.GoogleCallback)
 	})
 
 	// Initialize ticket store for WS authentication

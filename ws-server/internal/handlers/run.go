@@ -196,6 +196,22 @@ func (h *RunHandler) Run(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Email verification gating: unverified accounts are prohibited from running code
+	if h.db != nil {
+		user, err := h.db.GetUserByID(claims.UserID)
+		if err != nil || user == nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "user not found"})
+			return
+		}
+		if !user.EmailVerified {
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error":   "email_verification_required",
+				"message": "Email verification is required to execute code. Please verify your email before running code.",
+			})
+			return
+		}
+	}
+
 	slug := chi.URLParam(r, "slug")
 	ws, err := h.db.GetWorkspaceBySlug(slug)
 	if err != nil || ws == nil {
