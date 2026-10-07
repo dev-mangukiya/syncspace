@@ -37,9 +37,9 @@ func main() {
 	cfAccessClientID := getEnv("CF_ACCESS_CLIENT_ID", "")
 	cfAccessClientSecret := getEnv("CF_ACCESS_CLIENT_SECRET", "")
 	turnstileSecretKey := getEnv("TURNSTILE_SECRET_KEY", "1x0000000000000000000000000000000AA")
-	googleClientID := getEnv("GOOGLE_CLIENT_ID", "")
+	googleClientID := getEnv("GOOGLE_CLIENT_ID", "syncspace-app.apps.googleusercontent.com")
 	googleClientSecret := getEnv("GOOGLE_CLIENT_SECRET", "")
-	googleRedirectURI := getEnv("GOOGLE_REDIRECT_URI", "")
+	googleRedirectURI := getEnv("GOOGLE_REDIRECT_URI", "https://syncspace-bay.vercel.app/api/auth/google/callback")
 
 	// ── Env validation ───────────────────────────────────────────
 	// Refuse to start in production with default/weak JWT secret
