@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/syncspace/ws-server/internal/auth"
 	"github.com/syncspace/ws-server/internal/database"
+	"github.com/syncspace/ws-server/internal/email"
 	"github.com/syncspace/ws-server/internal/handlers"
 	"github.com/syncspace/ws-server/internal/middleware"
 	"github.com/syncspace/ws-server/internal/realtime"
@@ -36,10 +37,14 @@ func main() {
 	execSecret := getEnv("EXEC_SERVICE_SECRET", "")
 	cfAccessClientID := getEnv("CF_ACCESS_CLIENT_ID", "")
 	cfAccessClientSecret := getEnv("CF_ACCESS_CLIENT_SECRET", "")
-	turnstileSecretKey := getEnv("TURNSTILE_SECRET_KEY", "1x0000000000000000000000000000000AA")
-	googleClientID := getEnv("GOOGLE_CLIENT_ID", "syncspace-app.apps.googleusercontent.com")
-	googleClientSecret := getEnv("GOOGLE_CLIENT_SECRET", "")
+	turnstileSecretKey := os.Getenv("TURNSTILE_SECRET_KEY")
+	googleClientID := os.Getenv("GOOGLE_CLIENT_ID")
+	googleClientSecret := os.Getenv("GOOGLE_CLIENT_SECRET")
 	googleRedirectURI := getEnv("GOOGLE_REDIRECT_URI", "https://syncspace-bay.vercel.app/api/auth/google/callback")
+	appBaseURL := getEnv("APP_BASE_URL", "https://syncspace-bay.vercel.app")
+	resendAPIKey := os.Getenv("RESEND_API_KEY")
+	resendFromEmail := getEnv("RESEND_FROM_EMAIL", "SyncSpace <onboarding@resend.dev>")
+	emailService := email.NewService(resendAPIKey, resendFromEmail)
 
 	// ── Env validation ───────────────────────────────────────────
 	// Refuse to start in production with default/weak JWT secret
@@ -134,11 +139,12 @@ func main() {
 
 	// Initialize handlers
 	healthHandler := handlers.NewHealthHandler()
-	authHandler := handlers.NewAuthHandler(db, authService, handlers.AuthConfig{
+	authHandler := handlers.NewAuthHandler(db, authService, emailService, handlers.AuthConfig{
 		GoogleClientID:     googleClientID,
 		GoogleClientSecret: googleClientSecret,
 		GoogleRedirectURI:  googleRedirectURI,
 		TurnstileSecretKey: turnstileSecretKey,
+		AppBaseURL:         appBaseURL,
 		SecureCookie:       secureCookie,
 	})
 	workspaceHandler := handlers.NewWorkspaceHandler(db, hub)
@@ -199,6 +205,7 @@ func main() {
 		r.Post("/verify-email", authHandler.VerifyEmail)
 		r.Get("/google", authHandler.GoogleLogin)
 		r.Get("/google/callback", authHandler.GoogleCallback)
+		r.Get("/config-status", authHandler.ConfigStatus)
 	})
 
 	// Initialize ticket store for WS authentication
@@ -211,6 +218,7 @@ func main() {
 
 		r.Get("/api/auth/me", authHandler.Me)
 		r.Post("/api/auth/logout", authHandler.Logout)
+		r.Post("/api/auth/resend-verification", authHandler.ResendVerification)
 
 		r.Route("/api/workspaces", func(r chi.Router) {
 			r.Get("/", workspaceHandler.List)

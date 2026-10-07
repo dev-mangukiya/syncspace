@@ -15,33 +15,36 @@ import (
 
 	"github.com/syncspace/ws-server/internal/auth"
 	"github.com/syncspace/ws-server/internal/database"
+	"github.com/syncspace/ws-server/internal/email"
 	"github.com/syncspace/ws-server/internal/middleware"
 	"github.com/syncspace/ws-server/internal/models"
 )
 
-// AuthConfig holds OAuth and CAPTCHA configurations
+// AuthConfig holds OAuth, CAPTCHA, and email configurations
 type AuthConfig struct {
 	GoogleClientID     string
 	GoogleClientSecret string
 	GoogleRedirectURI  string
 	TurnstileSecretKey string
+	AppBaseURL         string
 	SecureCookie       bool
 }
 
-// AuthHandler handles signup/login/refresh/logout/me endpoints
+// AuthHandler handles signup/login/refresh/logout/me/verify/oauth endpoints
 type AuthHandler struct {
-	db          *database.DB
-	authService *auth.Service
-	config      AuthConfig
+	db           *database.DB
+	authService  *auth.Service
+	emailService email.Service
+	config       AuthConfig
 }
 
 // NewAuthHandler creates a new AuthHandler
-func NewAuthHandler(db *database.DB, authService *auth.Service, cfg ...AuthConfig) *AuthHandler {
+func NewAuthHandler(db *database.DB, authService *auth.Service, emailService email.Service, cfg ...AuthConfig) *AuthHandler {
 	c := AuthConfig{}
 	if len(cfg) > 0 {
 		c = cfg[0]
 	}
-	return &AuthHandler{db: db, authService: authService, config: c}
+	return &AuthHandler{db: db, authService: authService, emailService: emailService, config: c}
 }
 
 type signupRequest struct {
@@ -246,6 +249,20 @@ func (h *AuthHandler) Signup(w http.ResponseWriter, r *http.Request) {
 		expires := time.Now().Add(24 * time.Hour)
 		_ = h.db.SetEmailVerifyToken(user.ID, verifyToken, expires)
 		log.Printf("[AUTH] Generated email verification token for %s", user.Email)
+
+		// Dispatch verification email via email service
+		baseURL := h.config.AppBaseURL
+		if baseURL == "" {
+			baseURL = "https://syncspace-bay.vercel.app"
+		}
+		verifyURL := fmt.Sprintf("%s/api/auth/verify-email?token=%s&redirect=true", baseURL, verifyToken)
+		if h.emailService != nil {
+			go func(to, username, url string) {
+				if err := h.emailService.SendVerificationEmail(to, username, url); err != nil {
+					log.Printf("[AUTH] Failed to send verification email to %s: %v", to, err)
+				}
+			}(user.Email, user.Username, verifyURL)
+		}
 	}
 
 	// Issue tokens and set cookies
@@ -455,13 +472,69 @@ func (h *AuthHandler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ResendVerification generates a fresh verification token and dispatches the verification email
+func (h *AuthHandler) ResendVerification(w http.ResponseWriter, r *http.Request) {
+	claims := middleware.GetClaims(r)
+	if claims == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	user, err := h.db.GetUserByID(claims.UserID)
+	if err != nil || user == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found"})
+		return
+	}
+
+	if user.EmailVerified {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "email already verified"})
+		return
+	}
+
+	verifyBytes := make([]byte, 32)
+	if _, err := rand.Read(verifyBytes); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to generate token"})
+		return
+	}
+	verifyToken := hex.EncodeToString(verifyBytes)
+	expires := time.Now().Add(24 * time.Hour)
+	_ = h.db.SetEmailVerifyToken(user.ID, verifyToken, expires)
+
+	baseURL := h.config.AppBaseURL
+	if baseURL == "" {
+		baseURL = "https://syncspace-bay.vercel.app"
+	}
+	verifyURL := fmt.Sprintf("%s/api/auth/verify-email?token=%s&redirect=true", baseURL, verifyToken)
+	if h.emailService != nil {
+		go func(to, username, url string) {
+			_ = h.emailService.SendVerificationEmail(to, username, url)
+		}(user.Email, user.Username, verifyURL)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"message": "verification email sent",
+	})
+}
+
+// ConfigStatus reports configuration health without leaking secret values
+func (h *AuthHandler) ConfigStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"google_oauth_configured":  h.config.GoogleClientID != "" && h.config.GoogleClientSecret != "",
+		"google_client_id_set":     h.config.GoogleClientID != "",
+		"turnstile_configured":     h.config.TurnstileSecretKey != "",
+		"turnstile_is_test_key":    h.config.TurnstileSecretKey == "1x0000000000000000000000000000000AA" || h.config.TurnstileSecretKey == "2x0000000000000000000000000000000AB",
+		"email_service_configured": h.emailService != nil && h.emailService.IsConfigured(),
+	})
+}
+
 // GoogleLogin initiates the Google OAuth authorization-code flow
 func (h *AuthHandler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 	clientID := h.config.GoogleClientID
-	if clientID == "" {
+	clientSecret := h.config.GoogleClientSecret
+	if clientID == "" || clientSecret == "" {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"error":   "oauth_not_configured",
-			"message": "Google OAuth is not configured on this server.",
+			"message": "Google OAuth is not configured on Render. Please configure GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in Render Environment Variables.",
 		})
 		return
 	}

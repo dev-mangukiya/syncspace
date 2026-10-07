@@ -10,7 +10,7 @@ import (
 )
 
 func TestSignup_RequiresTerms(t *testing.T) {
-	h := NewAuthHandler(nil, nil)
+	h := NewAuthHandler(nil, nil, nil)
 	body, _ := json.Marshal(map[string]interface{}{
 		"username":        "testuser",
 		"email":           "test@example.com",
@@ -36,7 +36,7 @@ func TestSignup_RequiresTerms(t *testing.T) {
 }
 
 func TestSignup_RequiresTurnstileToken(t *testing.T) {
-	h := NewAuthHandler(nil, nil)
+	h := NewAuthHandler(nil, nil, nil)
 	body, _ := json.Marshal(map[string]interface{}{
 		"username":        "testuser",
 		"email":           "test@example.com",
@@ -63,7 +63,7 @@ func TestSignup_RequiresTurnstileToken(t *testing.T) {
 
 func TestSignup_RejectsInvalidTurnstileToken(t *testing.T) {
 	// Configure with Cloudflare's always-fails test secret
-	h := NewAuthHandler(nil, nil, AuthConfig{
+	h := NewAuthHandler(nil, nil, nil, AuthConfig{
 		TurnstileSecretKey: "2x0000000000000000000000000000000AB", // Cloudflare always-fails secret
 	})
 
@@ -92,10 +92,11 @@ func TestSignup_RejectsInvalidTurnstileToken(t *testing.T) {
 }
 
 func TestGoogleLogin_RedirectAndStateCookie(t *testing.T) {
-	h := NewAuthHandler(nil, nil, AuthConfig{
-		GoogleClientID:    "test-client-id.apps.googleusercontent.com",
-		GoogleRedirectURI: "https://syncspace.dev/api/auth/google/callback",
-		SecureCookie:      false,
+	h := NewAuthHandler(nil, nil, nil, AuthConfig{
+		GoogleClientID:     "test-client-id.apps.googleusercontent.com",
+		GoogleClientSecret: "test-client-secret",
+		GoogleRedirectURI:  "https://syncspace.dev/api/auth/google/callback",
+		SecureCookie:       false,
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/auth/google", nil)
@@ -142,7 +143,7 @@ func TestGoogleLogin_RedirectAndStateCookie(t *testing.T) {
 }
 
 func TestGoogleCallback_RejectsStateMismatch(t *testing.T) {
-	h := NewAuthHandler(nil, nil, AuthConfig{
+	h := NewAuthHandler(nil, nil, nil, AuthConfig{
 		GoogleClientID:     "test-client-id",
 		GoogleClientSecret: "test-client-secret",
 	})
@@ -168,7 +169,7 @@ func TestGoogleCallback_RejectsStateMismatch(t *testing.T) {
 }
 
 func TestGoogleCallback_RejectsMissingStateCookie(t *testing.T) {
-	h := NewAuthHandler(nil, nil, AuthConfig{
+	h := NewAuthHandler(nil, nil, nil, AuthConfig{
 		GoogleClientID:     "test-client-id",
 		GoogleClientSecret: "test-client-secret",
 	})
