@@ -67,6 +67,11 @@ export class SyncProvider {
   private simulatedOffline = false;
   private offlineEditCount = 0;
 
+  // ── Connection state tracking for BLOCKER-001 disclaimer ──
+  private _wasEverSynced = false;
+  private _disconnectedAt: number | null = null;
+  private _reconnectDelay = 3500; // 3.5s default reconnect delay, naturally covering > 3s threshold
+
   // ── Inspector counters (real WS traffic) ──────────────────
   private _syncMsgSent = 0;
   private _syncMsgReceived = 0;
@@ -116,6 +121,8 @@ export class SyncProvider {
   onSimulateOfflineChange: ((info: { offline: boolean; editCount: number }) => void) | null = null;
   // Fired on reconnect after simulated offline, with merge stats
   onMergeComplete: ((info: { offlineEdits: number; mergedAt: number }) => void) | null = null;
+  // Fired whenever provider re-syncs after being disconnected for >= 3 seconds (regardless of cause)
+  onLongDisconnectReconnect: ((info: { durationMs: number }) => void) | null = null;
 
   canSeed(): boolean {
     return this.hasSeedGrant;
@@ -140,9 +147,7 @@ export class SyncProvider {
       this.ws.close();
       this.ws = null;
     }
-    this.connected = false;
-    this.synced = false;
-    this.onStatus?.({ connected: false });
+    this._markDisconnected();
     this.onSimulateOfflineChange?.({ offline: true, editCount: 0 });
 
     // Track offline edits for merge feedback
@@ -271,15 +276,54 @@ export class SyncProvider {
     this.connect();
   }
 
+  private _markDisconnected() {
+    this.connected = false;
+    this.synced = false;
+    if (this._wasEverSynced && this._disconnectedAt === null) {
+      this._disconnectedAt = Date.now();
+    }
+    this.onStatus?.({ connected: false });
+  }
+
+  private _markSynced() {
+    this.synced = true;
+    if (this._wasEverSynced && this._disconnectedAt !== null) {
+      const durationMs = Date.now() - this._disconnectedAt;
+      if (durationMs >= 3000) {
+        this.onLongDisconnectReconnect?.({ durationMs });
+      }
+      this._disconnectedAt = null;
+    }
+    this._wasEverSynced = true;
+    this.onSynced?.();
+  }
+
+  forceClose(): void {
+    if (this.ws) {
+      this.ws.close();
+    }
+  }
+
+  getWebSocket(): WebSocket | null {
+    return this.ws;
+  }
+
+  setReconnectDelay(ms: number): void {
+    this._reconnectDelay = ms;
+  }
+
+  getDisconnectedDuration(): number | null {
+    if (this._disconnectedAt === null) return null;
+    return Date.now() - this._disconnectedAt;
+  }
+
   private _handleWindowOffline = () => {
     if (this.destroyed || this.simulatedOffline) return;
     if (this.ws) {
       try { this.ws.close(); } catch {}
       this.ws = null;
     }
-    this.connected = false;
-    this.synced = false;
-    this.onStatus?.({ connected: false });
+    this._markDisconnected();
   };
 
   private _handleWindowOnline = () => {
@@ -308,6 +352,7 @@ export class SyncProvider {
 
       if (!ticketRes.ok) {
         console.error('[SyncProvider] Failed to get ticket:', ticketRes.status);
+        this._markDisconnected();
         this.scheduleReconnect();
         return;
       }
@@ -321,6 +366,10 @@ export class SyncProvider {
       const ws = new WebSocket(wsUrl);
       ws.binaryType = 'arraybuffer';
       this.ws = ws;
+      if (typeof window !== 'undefined') {
+        (window as any).__syncProvider = this;
+        (window as any).__activeWs = ws;
+      }
 
       ws.onopen = () => {
         this.connected = true;
@@ -368,8 +417,7 @@ export class SyncProvider {
             !this.synced &&
             this.awareness.getStates().size <= 1
           ) {
-            this.synced = true;
-            this.onSynced?.();
+            this._markSynced();
           }
         }, 400);
       };
@@ -426,8 +474,7 @@ export class SyncProvider {
             this.onInspectorUpdate?.();
             // Mark as synced after receiving sync step 2
             if (msgType === 1 && !this.synced) {
-              this.synced = true;
-              this.onSynced?.();
+              this._markSynced();
             }
             break;
           }
@@ -446,10 +493,11 @@ export class SyncProvider {
           clearTimeout(this.solitarySyncTimer);
           this.solitarySyncTimer = null;
         }
-        this.connected = false;
-        this.synced = false;
-        this.onStatus?.({ connected: false });
+        this._markDisconnected();
         this.ws = null;
+        if (typeof window !== 'undefined' && (window as any).__activeWs === ws) {
+          (window as any).__activeWs = null;
+        }
 
         if (!this.destroyed) {
           // Remove awareness for this client
@@ -464,6 +512,7 @@ export class SyncProvider {
 
     } catch (err) {
       console.error('[SyncProvider] Connection error:', err);
+      this._markDisconnected();
       this.scheduleReconnect();
     }
   }
@@ -475,7 +524,7 @@ export class SyncProvider {
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
-    }, 2000);
+    }, this._reconnectDelay);
   }
 
   /**

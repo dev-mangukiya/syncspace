@@ -161,8 +161,6 @@ interface ActivePeer {
 
   // BLOCKER-001 disclaimer: banner shown after reconnecting following a disconnect of > 3s
   const [showReconnectNotice, setShowReconnectNotice] = useState(false);
-  const disconnectTimeRef = useRef<number | null>(null);
-  const wasConnectedRef = useRef<boolean>(false);
 
   // Execution state (Phase D)
   const [isRunning, setIsRunning] = useState(false);
@@ -324,25 +322,14 @@ interface ActivePeer {
     // Update sync status from this tab's provider
     provider.onStatus = ({ connected }) => {
       setSyncStatus(connected ? 'connecting' : 'disconnected');
-      if (!connected) {
-        if (wasConnectedRef.current && disconnectTimeRef.current === null) {
-          disconnectTimeRef.current = Date.now();
-        }
-      }
+    };
+    // BLOCKER-001: Keyed directly off provider's own connection state
+    provider.onLongDisconnectReconnect = ({ durationMs }) => {
+      console.log(`[Workspace] Provider reconnected after ${durationMs}ms disconnect -> showing BLOCKER-001 disclaimer`);
+      setShowReconnectNotice(true);
     };
     provider.onSynced = () => {
       setSyncStatus('synced');
-      // If client reconnected after being disconnected for > 3 seconds,
-      // display BLOCKER-001 disclaimer banner so users check Version History.
-      if (wasConnectedRef.current && disconnectTimeRef.current !== null) {
-        const disconnectedDurationMs = Date.now() - disconnectTimeRef.current;
-        if (disconnectedDurationMs >= 3000) {
-          setShowReconnectNotice(true);
-        }
-        disconnectTimeRef.current = null;
-      }
-      wasConnectedRef.current = true;
-
       const ytext = provider.getText();
       const tab = tabManager.tabState.openTabs.find(t => t.path === activePath);
       if (provider.canSeed() && ytext.length === 0 && tab?.file.content && tab.file.content.length > 0) {
@@ -397,11 +384,6 @@ interface ActivePeer {
     provider.onSimulateOfflineChange = (info) => {
       setSimulatedOffline(info.offline);
       setOfflineEditCount(info.editCount);
-      if (info.offline) {
-        if (disconnectTimeRef.current === null) {
-          disconnectTimeRef.current = Date.now();
-        }
-      }
     };
     provider.onMergeComplete = (info) => {
       setMergeToast({ edits: info.offlineEdits, timestamp: info.mergedAt });
@@ -417,7 +399,6 @@ interface ActivePeer {
     // Set initial sync status
     if (provider.isSynced()) {
       setSyncStatus('synced');
-      wasConnectedRef.current = true;
       setEditorContent(provider.getText().toString());
     } else {
       setSyncStatus('connecting');

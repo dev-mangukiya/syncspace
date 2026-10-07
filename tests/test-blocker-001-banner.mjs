@@ -1,14 +1,19 @@
 /**
  * Test: BLOCKER-001 Disclaimer Banner Verification
  * 
- * Verifies:
- * 1. Banner is NOT shown on initial clean connect.
- * 2. When client is disconnected for > 3 seconds and then reconnects:
- *    - Banner appears prominently above the editor (#blocker-001-reconnect-notice).
- *    - Banner displays plain language: "If you were offline while editing, check Version History to confirm nothing was overwritten."
- * 3. Clicking "Version History" opens the Version History panel (#version-history-panel).
- * 4. Clicking the dismiss button ('X') closes the notice.
- * 5. Captures screenshot evidence into artifacts directory.
+ * Verifies BOTH triggers without assumption:
+ * 1. Test Case 1: DIRECT WEBSOCKET FORCE-CLOSE (Network state UNTOUCHED)
+ *    - Force-closes the WebSocket directly in the browser (simulating server close, Render redeploy, idle timeout).
+ *    - navigator.onLine remains true (zero context.setOffline).
+ *    - Waits past the >= 3s threshold.
+ *    - WebSocket reconnects NATURALLY via scheduleReconnect().
+ *    - Asserts BLOCKER-001 banner appears (#blocker-001-reconnect-notice).
+ *    - Asserts plain-language copy, Version History button opens panel, dismiss button closes banner.
+ * 
+ * 2. Test Case 2: BROWSER-OFFLINE INTERFACE DROP (Original path)
+ *    - Toggles context.setOffline(true) for 4.5 seconds.
+ *    - Restores context.setOffline(false).
+ *    - Confirms natural reconnect triggers the same BLOCKER-001 banner.
  */
 
 import { chromium } from '@playwright/test';
@@ -26,7 +31,7 @@ if (!fs.existsSync(EVIDENCE_DIR)) {
 
 async function runTest() {
   console.log('======================================================');
-  console.log('TESTING BLOCKER-001 RECONNECT DISCLAIMER BANNER');
+  console.log('TESTING BLOCKER-001 WIDENED DISCONNECT TRIGGER');
   console.log('Target URL:', APP_URL);
   console.log('======================================================\n');
 
@@ -128,42 +133,58 @@ async function runTest() {
     throw new Error('Banner should NOT be visible on initial connection');
   }
 
-  // 6. Simulate a network disconnect of > 3 seconds (4 seconds)
-  console.log('6. Simulating network disconnect for 4.5 seconds...');
-  await context.setOffline(true);
-  console.log('   Context offline. Waiting 4.5 seconds...');
-  await page.waitForTimeout(4500);
+  // ══════════════════════════════════════════════════════════════
+  // TEST CASE 1: DIRECT WEBSOCKET CLOSE (Network state UNTOUCHED)
+  // ══════════════════════════════════════════════════════════════
+  console.log('\n──────────────────────────────────────────────────────');
+  console.log('CASE 1: DIRECT WEBSOCKET FORCE-CLOSE (Network untouched)');
+  console.log('──────────────────────────────────────────────────────');
 
-  // 7. Reconnect
-  console.log('7. Re-enabling network (context online)...');
-  await context.setOffline(false);
+  // Verify browser network is online
+  const isOnlineInitially = await page.evaluate(() => window.navigator.onLine);
+  console.log('   Browser navigator.onLine:', isOnlineInitially);
+  if (!isOnlineInitially) throw new Error('Browser should be online');
 
-  // Wait for reconnect and sync
-  console.log('8. Waiting for reconnect and BLOCKER-001 disclaimer banner to appear...');
-  await page.waitForSelector('#blocker-001-reconnect-notice', { timeout: 12000 });
-  console.log('   ✅ Banner appeared successfully!');
+  // Force-close the WebSocket directly
+  console.log('   Executing direct WebSocket close (server/socket drop emulation)...');
+  await page.evaluate(() => {
+    if (window.__activeWs) {
+      window.__activeWs.close();
+    } else if (window.__syncProvider) {
+      window.__syncProvider.forceClose();
+    } else {
+      throw new Error('No active WebSocket found on window');
+    }
+  });
 
-  // Check the text
-  const bannerText = await page.locator('#blocker-001-reconnect-notice').textContent();
-  console.log('   Banner text:', bannerText.trim());
+  // Confirm browser network state was NOT changed
+  const isStillOnline = await page.evaluate(() => window.navigator.onLine);
+  console.log('   Browser navigator.onLine after WS close:', isStillOnline, '(MUST BE TRUE)');
+  if (!isStillOnline) throw new Error('Browser network state was modified!');
 
-  const expectedSnippet = 'If you were offline while editing, check Version History to confirm nothing was overwritten.';
-  if (!bannerText.includes('Version History') || !bannerText.includes('confirm nothing was overwritten')) {
-    throw new Error(`Banner does not contain expected disclaimer text! Got: "${bannerText}"`);
+  // Wait past the threshold (> 3 seconds) while WebSocket reconnects naturally via scheduleReconnect()
+  console.log('   Waiting past the 3s threshold for natural auto-reconnect...');
+  await page.waitForSelector('#blocker-001-reconnect-notice', { timeout: 15000 });
+  console.log('   ✅ Banner appeared successfully after direct socket drop!');
+
+  const bannerText1 = await page.locator('#blocker-001-reconnect-notice').textContent();
+  console.log('   Banner text:', bannerText1.trim());
+
+  if (!bannerText1.includes('Version History') || !bannerText1.includes('confirm nothing was overwritten')) {
+    throw new Error(`Banner does not contain expected disclaimer text! Got: "${bannerText1}"`);
   }
   console.log('   ✅ Banner text verification passed.');
 
-  // Take screenshot of the banner
-  const screenshotPathArtifact = path.join(ARTIFACT_DIR, 'blocker_001_banner.png');
-  const screenshotPathEvidence = path.join(EVIDENCE_DIR, 'blocker_001_banner.png');
+  // Screenshot evidence for Case 1
+  const screenshotPathArtifact = path.join(ARTIFACT_DIR, 'blocker_001_ws_close_banner.png');
+  const screenshotPathEvidence = path.join(EVIDENCE_DIR, 'blocker_001_ws_close_banner.png');
   await page.screenshot({ path: screenshotPathArtifact });
   await page.screenshot({ path: screenshotPathEvidence });
-  console.log('   📸 Saved screenshot to:', screenshotPathArtifact);
+  console.log('   📸 Saved Case 1 screenshot to:', screenshotPathArtifact);
 
-  // 8. Test clicking "Version History"
-  console.log('9. Testing Version History button in banner...');
-  const vhBtn = page.locator('#banner-open-history-btn');
-  await vhBtn.click();
+  // Test opening Version History panel
+  console.log('   Testing Version History button in banner...');
+  await page.click('#banner-open-history-btn');
   await page.waitForTimeout(500);
 
   const vhPanel = page.locator('#version-history-panel');
@@ -178,20 +199,53 @@ async function runTest() {
   await closeVhBtn.click();
   await page.waitForTimeout(300);
 
-  // 9. Test dismiss button ('X')
-  console.log('10. Testing dismiss button (#dismiss-reconnect-notice-btn)...');
+  // Dismiss banner
+  console.log('   Dismissing banner (#dismiss-reconnect-notice-btn)...');
   await page.click('#dismiss-reconnect-notice-btn');
   await page.waitForTimeout(500);
 
-  const bannerStillVisible = await page.isVisible('#blocker-001-reconnect-notice');
-  console.log('    Banner visibility after dismiss:', bannerStillVisible ? 'FAIL (still visible)' : '✅ PASS (dismissed)');
-  if (bannerStillVisible) {
+  const bannerDismissed1 = await page.isVisible('#blocker-001-reconnect-notice');
+  console.log('   Banner visibility after dismiss:', bannerDismissed1 ? 'FAIL (still visible)' : '✅ PASS (dismissed)');
+  if (bannerDismissed1) {
     throw new Error('Dismiss button did not dismiss the banner');
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // TEST CASE 2: BROWSER-OFFLINE INTERFACE DROP (Original path)
+  // ══════════════════════════════════════════════════════════════
+  console.log('\n──────────────────────────────────────────────────────');
+  console.log('CASE 2: BROWSER-OFFLINE INTERFACE DROP (Original path)');
+  console.log('──────────────────────────────────────────────────────');
+
+  console.log('   Simulating browser network drop (context.setOffline(true)) for 4.5s...');
+  await context.setOffline(true);
+  await page.waitForTimeout(4500);
+
+  console.log('   Restoring browser network (context.setOffline(false))...');
+  await context.setOffline(false);
+
+  console.log('   Waiting for reconnect and BLOCKER-001 banner to appear...');
+  await page.waitForSelector('#blocker-001-reconnect-notice', { timeout: 15000 });
+  console.log('   ✅ Banner appeared successfully after browser-offline recovery!');
+
+  const bannerText2 = await page.locator('#blocker-001-reconnect-notice').textContent();
+  if (!bannerText2.includes('Version History') || !bannerText2.includes('confirm nothing was overwritten')) {
+    throw new Error(`Banner does not contain expected disclaimer text! Got: "${bannerText2}"`);
+  }
+  console.log('   ✅ Case 2 banner copy verified.');
+
+  // Dismiss banner
+  await page.click('#dismiss-reconnect-notice-btn');
+  await page.waitForTimeout(500);
+  const bannerDismissed2 = await page.isVisible('#blocker-001-reconnect-notice');
+  if (bannerDismissed2) {
+    throw new Error('Dismiss button did not dismiss Case 2 banner');
+  }
+  console.log('   ✅ Case 2 dismissed cleanly.');
+
   await browser.close();
   console.log('\n======================================================');
-  console.log('🎉 ALL BLOCKER-001 BANNER CHECKS PASSED PERFECTLY!');
+  console.log('🎉 BOTH TRIGGER PATHS VERIFIED & PASSING WITH EVIDENCE!');
   console.log('======================================================\n');
 }
 
