@@ -64,9 +64,10 @@ type loginRequest struct {
 // authResponse no longer contains the JWT token — it's in an httpOnly cookie.
 // The response body only contains user info and a CSRF token (readable by JS).
 type authResponse struct {
-	User             interface{} `json:"user"`
-	CSRFToken        string      `json:"csrf_token"`
-	VerificationLink string      `json:"verification_link,omitempty"`
+	User           interface{} `json:"user"`
+	CSRFToken      string      `json:"csrf_token"`
+	EmailDelivered bool        `json:"email_delivered"`
+	EmailNotice    string      `json:"email_notice,omitempty"`
 }
 
 var (
@@ -129,8 +130,7 @@ type turnstileVerifyResponse struct {
 func (h *AuthHandler) verifyTurnstile(token, remoteIP string) (bool, error) {
 	secret := h.config.TurnstileSecretKey
 	if secret == "" {
-		// Cloudflare standard test secret (always passes)
-		secret = "1x0000000000000000000000000000000AA"
+		return false, fmt.Errorf("turnstile secret key is not configured on server")
 	}
 
 	body, _ := json.Marshal(turnstileVerifyRequest{
@@ -244,7 +244,9 @@ func (h *AuthHandler) Signup(w http.ResponseWriter, r *http.Request) {
 	_ = h.db.AcceptTerms(user.ID)
 
 	// Generate email verification token (24-hour expiration)
-	var verifyURL string
+	var emailDelivered bool
+	var emailNotice string
+
 	verifyBytes := make([]byte, 32)
 	if _, err := rand.Read(verifyBytes); err == nil {
 		verifyToken := hex.EncodeToString(verifyBytes)
@@ -252,18 +254,25 @@ func (h *AuthHandler) Signup(w http.ResponseWriter, r *http.Request) {
 		_ = h.db.SetEmailVerifyToken(user.ID, verifyToken, expires)
 		log.Printf("[AUTH] Generated email verification token for %s", user.Email)
 
-		// Dispatch verification email via email service
 		baseURL := h.config.AppBaseURL
 		if baseURL == "" {
 			baseURL = "https://syncspace-bay.vercel.app"
 		}
-		verifyURL = fmt.Sprintf("%s/api/auth/verify-email?token=%s&redirect=true", baseURL, verifyToken)
+		verifyURL := fmt.Sprintf("%s/api/auth/verify-email?token=%s&redirect=true", baseURL, verifyToken)
+
 		if h.emailService != nil && h.emailService.IsConfigured() {
-			go func(to, username, url string) {
-				if err := h.emailService.SendVerificationEmail(to, username, url); err != nil {
-					log.Printf("[AUTH] Failed to send verification email to %s: %v", to, err)
-				}
-			}(user.Email, user.Username, verifyURL)
+			if sendErr := h.emailService.SendVerificationEmail(user.Email, user.Username, verifyURL); sendErr != nil {
+				log.Printf("[AUTH] Verification email delivery failed to %s: %v", user.Email, sendErr)
+				emailDelivered = false
+				emailNotice = "Verification email could not be delivered to this address under the test sender. Connect your Google account to immediately unlock code execution."
+			} else {
+				log.Printf("[AUTH] Verification email delivered to %s", user.Email)
+				emailDelivered = true
+				emailNotice = "Verification email sent. Please check your inbox."
+			}
+		} else {
+			emailDelivered = false
+			emailNotice = "Email verification service is not active. Connect your Google account to unlock code execution."
 		}
 	}
 
@@ -274,10 +283,11 @@ func (h *AuthHandler) Signup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := authResponse{User: user, CSRFToken: csrfToken}
-	// If email service is not configured on the server, include verification link directly so users/tests can complete verification
-	if h.emailService == nil || !h.emailService.IsConfigured() {
-		resp.VerificationLink = verifyURL
+	resp := authResponse{
+		User:           user,
+		CSRFToken:      csrfToken,
+		EmailDelivered: emailDelivered,
+		EmailNotice:    emailNotice,
 	}
 
 	writeJSON(w, http.StatusCreated, resp)
@@ -513,29 +523,27 @@ func (h *AuthHandler) ResendVerification(w http.ResponseWriter, r *http.Request)
 		baseURL = "https://syncspace-bay.vercel.app"
 	}
 	verifyURL := fmt.Sprintf("%s/api/auth/verify-email?token=%s&redirect=true", baseURL, verifyToken)
-	if h.emailService != nil {
-		go func(to, username, url string) {
-			_ = h.emailService.SendVerificationEmail(to, username, url)
-		}(user.Email, user.Username, verifyURL)
+
+	if h.emailService != nil && h.emailService.IsConfigured() {
+		if sendErr := h.emailService.SendVerificationEmail(user.Email, user.Username, verifyURL); sendErr != nil {
+			log.Printf("[AUTH] Resend verification email failed for %s: %v", user.Email, sendErr)
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"email_delivered": false,
+				"message":         "Email delivery failed: the test email provider cannot deliver to external inboxes. To unlock code execution, please connect your Google account.",
+			})
+			return
+		}
+	} else {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"email_delivered": false,
+			"message":         "Email service is currently unconfigured. Connect your Google account to verify and unlock Run.",
+		})
+		return
 	}
 
-	respData := map[string]string{
-		"message": "verification email sent",
-	}
-	if h.emailService == nil || !h.emailService.IsConfigured() {
-		respData["verification_link"] = verifyURL
-	}
-	writeJSON(w, http.StatusOK, respData)
-}
-
-// ConfigStatus reports configuration health without leaking secret values
-func (h *AuthHandler) ConfigStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"google_oauth_configured":  h.config.GoogleClientID != "" && h.config.GoogleClientSecret != "",
-		"google_client_id_set":     h.config.GoogleClientID != "",
-		"turnstile_configured":     h.config.TurnstileSecretKey != "",
-		"turnstile_is_test_key":    h.config.TurnstileSecretKey == "1x0000000000000000000000000000000AA" || h.config.TurnstileSecretKey == "2x0000000000000000000000000000000AB",
-		"email_service_configured": h.emailService != nil && h.emailService.IsConfigured(),
+		"email_delivered": true,
+		"message":         "Verification email sent. Please check your inbox.",
 	})
 }
 
@@ -569,6 +577,19 @@ func (h *AuthHandler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 		Secure:   h.config.SecureCookie,
 		SameSite: http.SameSiteLaxMode,
 	})
+
+	// Store return_to url if safe relative path
+	if returnTo := r.URL.Query().Get("return_to"); returnTo != "" && strings.HasPrefix(returnTo, "/") && !strings.HasPrefix(returnTo, "//") {
+		http.SetCookie(w, &http.Cookie{
+			Name:     "syncspace_oauth_return",
+			Value:    returnTo,
+			Path:     "/",
+			MaxAge:   600,
+			HttpOnly: true,
+			Secure:   h.config.SecureCookie,
+			SameSite: http.SameSiteLaxMode,
+		})
+	}
 
 	// Determine redirect URI
 	redirectURI := h.config.GoogleRedirectURI
@@ -768,8 +789,22 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Redirect to dashboard
-	http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+	// Determine redirect destination (e.g. back to workspace if initiated from Run unlock prompt)
+	dest := "/dashboard"
+	if retCookie, err := r.Cookie("syncspace_oauth_return"); err == nil && retCookie.Value != "" && strings.HasPrefix(retCookie.Value, "/") && !strings.HasPrefix(retCookie.Value, "//") {
+		dest = retCookie.Value
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     "syncspace_oauth_return",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   h.config.SecureCookie,
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	http.Redirect(w, r, dest, http.StatusSeeOther)
 }
 
 func sanitizeOAuthUsername(name, email string) string {

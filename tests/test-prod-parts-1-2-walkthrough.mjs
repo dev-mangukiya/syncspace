@@ -70,6 +70,24 @@ async function runBrowserWalkthrough() {
   const isGoogleAccounts = currentUrl.includes('accounts.google.com');
   console.log(`   [Check] Browser landed on accounts.google.com: ${isGoogleAccounts}`);
 
+  // Wait for Google page to finish rendering
+  await page.waitForTimeout(3000);
+  const pageTitle = await page.title();
+  const pageText = await page.textContent('body');
+  console.log(`   Google Page Title: "${pageTitle}"`);
+  console.log(`   Final Page URL: ${page.url()}`);
+  
+  const isErrorPage = page.url().includes('/signin/oauth/error') || pageText.includes('Authorization Error') || pageText.includes('Error 400') || pageText.includes('Error 401');
+  const isConsentOrPicker = pageText.includes('Choose an account') || pageText.includes('Sign in with Google') || pageText.includes('to continue to SyncSpace') || pageText.includes('SyncSpace');
+
+  console.log(`   [Check] Is Google Error Screen: ${isErrorPage}`);
+  console.log(`   [Check] Is Real Consent/Account-Picker Screen: ${isConsentOrPicker}`);
+  if (isErrorPage) {
+    console.log(`   >>> EXACT GOOGLE ERROR TEXT <<<\n${pageText.trim().slice(0, 500)}\n`);
+  } else {
+    console.log(`   >>> GOOGLE SCREEN TEXT <<<\n${pageText.trim().slice(0, 500)}\n`);
+  }
+
   const oauthScreenshot = path.join(ARTIFACT_DIR, 'prod_google_oauth_redirect.png');
   await page.screenshot({ path: oauthScreenshot, fullPage: false });
   console.log(`   Screenshot saved: ${oauthScreenshot}`);

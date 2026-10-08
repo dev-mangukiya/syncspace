@@ -43,8 +43,8 @@ func main() {
 	googleRedirectURI := getEnv("GOOGLE_REDIRECT_URI", "https://syncspace-bay.vercel.app/api/auth/google/callback")
 	appBaseURL := getEnv("APP_BASE_URL", "https://syncspace-bay.vercel.app")
 	resendAPIKey := os.Getenv("RESEND_API_KEY")
-	resendFromEmail := getEnv("RESEND_FROM_EMAIL", "SyncSpace <onboarding@resend.dev>")
-	emailService := email.NewService(resendAPIKey, resendFromEmail)
+	emailFrom := getEnv("EMAIL_FROM", getEnv("RESEND_FROM_EMAIL", "SyncSpace <onboarding@resend.dev>"))
+	emailService := email.NewService(resendAPIKey, emailFrom)
 
 	// ── Env validation ───────────────────────────────────────────
 	// Refuse to start in production with default/weak JWT secret
@@ -205,7 +205,6 @@ func main() {
 		r.Post("/verify-email", authHandler.VerifyEmail)
 		r.Get("/google", authHandler.GoogleLogin)
 		r.Get("/google/callback", authHandler.GoogleCallback)
-		r.Get("/config-status", authHandler.ConfigStatus)
 	})
 
 	// Initialize ticket store for WS authentication

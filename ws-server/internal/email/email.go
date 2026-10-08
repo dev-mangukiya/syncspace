@@ -102,7 +102,10 @@ func (s *ResendService) SendVerificationEmail(toEmail, username, verifyURL strin
 	if resp.StatusCode >= 400 {
 		var errResp map[string]interface{}
 		_ = json.NewDecoder(resp.Body).Decode(&errResp)
-		log.Printf("[EMAIL] Resend API error (HTTP %d): %v", resp.StatusCode, errResp)
+		log.Printf("[EMAIL] Resend delivery rejected (HTTP %d): %v", resp.StatusCode, errResp)
+		if resp.StatusCode == http.StatusForbidden {
+			return fmt.Errorf("resend sandbox restriction (HTTP 403): only registered account owner can receive emails")
+		}
 		return fmt.Errorf("resend returned status %d", resp.StatusCode)
 	}
 

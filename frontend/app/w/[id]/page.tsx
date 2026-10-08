@@ -177,6 +177,7 @@ interface ActivePeer {
   const executing = isRunning;
   const [showOutput, setShowOutput] = useState(false);
   const [outputHeight, setOutputHeight] = useState(220);
+  const [isEmailBlocked, setIsEmailBlocked] = useState(false);
 
   // AI Chat state
   const [showAI, setShowAI] = useState(false);
@@ -584,6 +585,7 @@ interface ActivePeer {
       });
 
       if (res.data) {
+        setIsEmailBlocked(false);
         setLastRunResult({
           exitCode: res.data.exit_code,
           durationMs: res.data.duration_ms,
@@ -598,6 +600,11 @@ interface ActivePeer {
       }
     } catch (err: unknown) {
       if (axios.isAxiosError(err)) {
+        const status = err.response?.status;
+        const errData = err.response?.data;
+        if (status === 403 && (errData?.error === 'email_verification_required' || errData?.message?.includes('verification'))) {
+          setIsEmailBlocked(true);
+        }
         const errorMsg = err.response?.data?.message || err.response?.data?.error || err.message;
         setError(errorMsg);
         setTimeout(() => setError(''), 5000);
@@ -1529,6 +1536,7 @@ interface ActivePeer {
               onCancelRun={cancelRun}
               activeRunOutput={activeRunOutput}
               lastRunResult={lastRunResult}
+              isEmailBlocked={isEmailBlocked}
             />
           )}
         </div>

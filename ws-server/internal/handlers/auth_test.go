@@ -91,6 +91,20 @@ func TestSignup_RejectsInvalidTurnstileToken(t *testing.T) {
 	}
 }
 
+func TestVerifyTurnstile_RejectsWhenSecretUnset(t *testing.T) {
+	h := NewAuthHandler(nil, nil, nil, AuthConfig{
+		TurnstileSecretKey: "", // unset
+	})
+
+	valid, err := h.verifyTurnstile("any-token", "127.0.0.1")
+	if valid {
+		t.Fatal("expected verifyTurnstile to fail when TurnstileSecretKey is unset")
+	}
+	if err == nil {
+		t.Fatal("expected error when TurnstileSecretKey is unset")
+	}
+}
+
 func TestGoogleLogin_RedirectAndStateCookie(t *testing.T) {
 	h := NewAuthHandler(nil, nil, nil, AuthConfig{
 		GoogleClientID:     "test-client-id.apps.googleusercontent.com",

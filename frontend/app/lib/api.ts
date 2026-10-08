@@ -93,6 +93,8 @@ export interface User {
   email: string;
   display_name: string;
   avatar_url: string;
+  email_verified: boolean;
+  oauth_provider?: string;
   created_at: string;
   updated_at: string;
 }
