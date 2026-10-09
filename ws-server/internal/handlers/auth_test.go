@@ -287,3 +287,15 @@ func TestGoogleLogin_ClearsLinkingUserCookieWhenUnauthenticated(t *testing.T) {
 		t.Fatalf("expected link cookie to be cleared (MaxAge -1, Value empty), got MaxAge=%d, Value=%s", linkCookie.MaxAge, linkCookie.Value)
 	}
 }
+
+func TestAuthService_CheckPasswordRejectsEmptyHash(t *testing.T) {
+	authSvc := auth.NewService("test-jwt-secret-32-bytes-long!!", false)
+	// When password_hash is invalidated to empty string "" (pre-hijacking mitigation),
+	// CheckPassword must strictly return false for any password.
+	if authSvc.CheckPassword("AnyPassword123!", "") {
+		t.Fatal("expected CheckPassword to reject empty password hash")
+	}
+	if authSvc.CheckPassword("AttackerSecret123!", "") {
+		t.Fatal("expected CheckPassword to reject empty password hash")
+	}
+}
