@@ -145,6 +145,30 @@ func (db *DB) LinkOAuth(userID uuid.UUID, provider, providerID string) error {
 	return err
 }
 
+// LinkOAuthInvalidatingPassword links an OAuth identity to an unverified existing user,
+// marks email_verified = true, clears password_hash to prevent pre-hijacking backdoors,
+// and revokes all active refresh tokens for the user.
+func (db *DB) LinkOAuthInvalidatingPassword(userID uuid.UUID, provider, providerID string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(`UPDATE users SET oauth_provider = $1, oauth_provider_id = $2, email_verified = true, password_hash = '' WHERE id = $3`,
+		provider, providerID, userID)
+	if err != nil {
+		return fmt.Errorf("update user oauth and clear password: %w", err)
+	}
+
+	_, err = tx.Exec(`DELETE FROM refresh_tokens WHERE user_id = $1`, userID)
+	if err != nil {
+		return fmt.Errorf("revoke refresh tokens: %w", err)
+	}
+
+	return tx.Commit()
+}
+
 // ── Terms ────────────────────────────────────────────────────
 
 // AcceptTerms records that the user accepted terms of service

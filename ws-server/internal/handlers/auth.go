@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/syncspace/ws-server/internal/auth"
 	"github.com/syncspace/ws-server/internal/database"
 	"github.com/syncspace/ws-server/internal/email"
@@ -264,7 +265,7 @@ func (h *AuthHandler) Signup(w http.ResponseWriter, r *http.Request) {
 			if sendErr := h.emailService.SendVerificationEmail(user.Email, user.Username, verifyURL); sendErr != nil {
 				log.Printf("[AUTH] Verification email delivery failed to %s: %v", user.Email, sendErr)
 				emailDelivered = false
-				emailNotice = "Verification email could not be delivered to this address under the test sender. Connect your Google account to immediately unlock code execution."
+				emailNotice = "Email verification isn't available for this account yet. Sign in with Google to unlock Run instantly."
 			} else {
 				log.Printf("[AUTH] Verification email delivered to %s", user.Email)
 				emailDelivered = true
@@ -272,7 +273,7 @@ func (h *AuthHandler) Signup(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			emailDelivered = false
-			emailNotice = "Email verification service is not active. Connect your Google account to unlock code execution."
+			emailNotice = "Email verification isn't available for this account yet. Sign in with Google to unlock Run instantly."
 		}
 	}
 
@@ -327,7 +328,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.authService.CheckPassword(req.Password, user.PasswordHash) {
+	if user.PasswordHash == "" || !h.authService.CheckPassword(req.Password, user.PasswordHash) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
 		return
 	}
@@ -529,14 +530,14 @@ func (h *AuthHandler) ResendVerification(w http.ResponseWriter, r *http.Request)
 			log.Printf("[AUTH] Resend verification email failed for %s: %v", user.Email, sendErr)
 			writeJSON(w, http.StatusOK, map[string]interface{}{
 				"email_delivered": false,
-				"message":         "Email delivery failed: the test email provider cannot deliver to external inboxes. To unlock code execution, please connect your Google account.",
+				"message":         "Email verification isn't available for this account yet. Sign in with Google to unlock Run instantly.",
 			})
 			return
 		}
 	} else {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"email_delivered": false,
-			"message":         "Email service is currently unconfigured. Connect your Google account to verify and unlock Run.",
+			"message":         "Email verification isn't available for this account yet. Sign in with Google to unlock Run instantly.",
 		})
 		return
 	}
@@ -585,6 +586,32 @@ func (h *AuthHandler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 			Value:    returnTo,
 			Path:     "/",
 			MaxAge:   600,
+			HttpOnly: true,
+			Secure:   h.config.SecureCookie,
+			SameSite: http.SameSiteLaxMode,
+		})
+	}
+
+	// If the user is currently authenticated, record their UserID in an httpOnly cookie
+	// so the callback links directly to this session's existing account.
+	if cookie, err := r.Cookie("syncspace_access"); err == nil && cookie.Value != "" {
+		if claims, err := h.authService.ValidateToken(cookie.Value); err == nil && claims != nil {
+			http.SetCookie(w, &http.Cookie{
+				Name:     "syncspace_oauth_link_user",
+				Value:    claims.UserID.String(),
+				Path:     "/",
+				MaxAge:   600,
+				HttpOnly: true,
+				Secure:   h.config.SecureCookie,
+				SameSite: http.SameSiteLaxMode,
+			})
+		}
+	} else {
+		http.SetCookie(w, &http.Cookie{
+			Name:     "syncspace_oauth_link_user",
+			Value:    "",
+			Path:     "/",
+			MaxAge:   -1,
 			HttpOnly: true,
 			Secure:   h.config.SecureCookie,
 			SameSite: http.SameSiteLaxMode,
@@ -740,55 +767,6 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 
 	googleEmail := strings.ToLower(strings.TrimSpace(googleProfile.Email))
 
-	// Account linking logic:
-	// 1. Check existing user by Google provider + provider_id
-	user, err := h.db.GetUserByOAuth("google", googleProfile.Sub)
-	if err != nil || user == nil {
-		// 2. Existing email -> link Google identity to that account
-		existingUser, _ := h.db.GetUserByEmail(googleEmail)
-		if existingUser != nil {
-			if err := h.db.LinkOAuth(existingUser.ID, "google", googleProfile.Sub); err != nil {
-				log.Printf("[OAUTH] LinkOAuth failed: %v", err)
-				http.Redirect(w, r, "/auth/login?error=link_failed", http.StatusSeeOther)
-				return
-			}
-			user = existingUser
-			user.EmailVerified = true
-			user.OAuthProvider = "google"
-		} else {
-			// 3. New email -> Create an OAuth-only account
-			username := sanitizeOAuthUsername(googleProfile.Name, googleEmail)
-			for i := 0; i < 5; i++ {
-				u, _ := h.db.GetUserByUsername(username)
-				if u == nil {
-					break
-				}
-				username = fmt.Sprintf("%s_%x", username[:min(len(username), 20)], time.Now().UnixNano()%10000)
-			}
-
-			displayName := strings.TrimSpace(googleProfile.Name)
-			if displayName == "" {
-				displayName = username
-			}
-
-			newUser, err := h.db.CreateOAuthUser(username, googleEmail, "google", googleProfile.Sub, displayName, googleProfile.Picture)
-			if err != nil {
-				log.Printf("[OAUTH] CreateOAuthUser failed: %v", err)
-				http.Redirect(w, r, "/auth/login?error=create_user_failed", http.StatusSeeOther)
-				return
-			}
-			user = newUser
-		}
-	}
-
-	// Issue SyncSpace's normal session cookies exactly as regular login does
-	_, err = h.issueTokensAndCookies(w, user)
-	if err != nil {
-		log.Printf("[OAUTH] Failed to issue session cookies: %v", err)
-		http.Redirect(w, r, "/auth/login?error=session_error", http.StatusSeeOther)
-		return
-	}
-
 	// Determine redirect destination (e.g. back to workspace if initiated from Run unlock prompt)
 	dest := "/dashboard"
 	if retCookie, err := r.Cookie("syncspace_oauth_return"); err == nil && retCookie.Value != "" && strings.HasPrefix(retCookie.Value, "/") && !strings.HasPrefix(retCookie.Value, "//") {
@@ -803,6 +781,125 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 		Secure:   h.config.SecureCookie,
 		SameSite: http.SameSiteLaxMode,
 	})
+
+	// Check if this OAuth flow was initiated from an active authenticated session
+	var linkingUserID *uuid.UUID
+	if linkCookie, err := r.Cookie("syncspace_oauth_link_user"); err == nil && linkCookie.Value != "" {
+		if uid, err := uuid.Parse(linkCookie.Value); err == nil {
+			linkingUserID = &uid
+		}
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     "syncspace_oauth_link_user",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   h.config.SecureCookie,
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	var user *models.User
+
+	if linkingUserID != nil {
+		// ── Path 1: Authenticated Session Linking ──
+		// When initiated from an existing logged-in session, attach directly to that session's user_id.
+		// Bypass email matching completely so the current user account is always linked.
+		sessionUser, err := h.db.GetUserByID(*linkingUserID)
+		if err != nil || sessionUser == nil {
+			log.Printf("[OAUTH] Authenticated linking target user not found: %v", linkingUserID)
+			http.Redirect(w, r, "/auth/login?error="+url.QueryEscape("Account linking failed: session user not found"), http.StatusSeeOther)
+			return
+		}
+
+		// Ensure this Google identity (sub) is not already linked to another user
+		existingOAuthUser, _ := h.db.GetUserByOAuth("google", googleProfile.Sub)
+		if existingOAuthUser != nil && existingOAuthUser.ID != *linkingUserID {
+			log.Printf("[OAUTH] Conflict: Google identity %s is already bound to user %s (linking attempted by %s)",
+				googleProfile.Sub, existingOAuthUser.ID, *linkingUserID)
+			http.Redirect(w, r, dest+"?error="+url.QueryEscape("This Google account is already linked to another SyncSpace account"), http.StatusSeeOther)
+			return
+		}
+
+		if err := h.db.LinkOAuth(sessionUser.ID, "google", googleProfile.Sub); err != nil {
+			log.Printf("[OAUTH] LinkOAuth failed for session user %s: %v", sessionUser.ID, err)
+			http.Redirect(w, r, dest+"?error="+url.QueryEscape("Failed to link Google account"), http.StatusSeeOther)
+			return
+		}
+
+		user = sessionUser
+		user.EmailVerified = true
+		user.OAuthProvider = "google"
+	} else {
+		// ── Path 2: Cold Google Login (No active session) ──
+		// 1. Existing user by Google provider + provider_id
+		existingOAuthUser, err := h.db.GetUserByOAuth("google", googleProfile.Sub)
+		if err == nil && existingOAuthUser != nil {
+			user = existingOAuthUser
+		} else {
+			// 2. Existing email match
+			existingUser, _ := h.db.GetUserByEmail(googleEmail)
+			if existingUser != nil {
+				if !existingUser.EmailVerified {
+					// ── Pre-hijacking Mitigation (Option a) ──
+					// An unverified password account exists with this email address.
+					// An attacker could have registered this email hoping to maintain backdoor access.
+					// Invalidate the existing password hash entirely and revoke all active refresh tokens!
+					log.Printf("[OAUTH] Cold login matched unverified account %s (%s). Invalidating standing password hash to prevent pre-hijacking backdoor.",
+						existingUser.ID, existingUser.Email)
+					if err := h.db.LinkOAuthInvalidatingPassword(existingUser.ID, "google", googleProfile.Sub); err != nil {
+						log.Printf("[OAUTH] LinkOAuthInvalidatingPassword failed: %v", err)
+						http.Redirect(w, r, "/auth/login?error=link_failed", http.StatusSeeOther)
+						return
+					}
+					user = existingUser
+					user.EmailVerified = true
+					user.OAuthProvider = "google"
+					user.PasswordHash = ""
+				} else {
+					// Account was already verified by the true owner; link without password invalidation
+					if err := h.db.LinkOAuth(existingUser.ID, "google", googleProfile.Sub); err != nil {
+						log.Printf("[OAUTH] LinkOAuth failed: %v", err)
+						http.Redirect(w, r, "/auth/login?error=link_failed", http.StatusSeeOther)
+						return
+					}
+					user = existingUser
+					user.OAuthProvider = "google"
+				}
+			} else {
+				// 3. New email -> Create an OAuth-only account
+				username := sanitizeOAuthUsername(googleProfile.Name, googleEmail)
+				for i := 0; i < 5; i++ {
+					u, _ := h.db.GetUserByUsername(username)
+					if u == nil {
+						break
+					}
+					username = fmt.Sprintf("%s_%x", username[:min(len(username), 20)], time.Now().UnixNano()%10000)
+				}
+
+				displayName := strings.TrimSpace(googleProfile.Name)
+				if displayName == "" {
+					displayName = username
+				}
+
+				newUser, err := h.db.CreateOAuthUser(username, googleEmail, "google", googleProfile.Sub, displayName, googleProfile.Picture)
+				if err != nil {
+					log.Printf("[OAUTH] CreateOAuthUser failed: %v", err)
+					http.Redirect(w, r, "/auth/login?error=create_user_failed", http.StatusSeeOther)
+					return
+				}
+				user = newUser
+			}
+		}
+	}
+
+	// Issue SyncSpace's normal session cookies exactly as regular login does
+	_, err = h.issueTokensAndCookies(w, user)
+	if err != nil {
+		log.Printf("[OAUTH] Failed to issue session cookies: %v", err)
+		http.Redirect(w, r, "/auth/login?error=session_error", http.StatusSeeOther)
+		return
+	}
 
 	http.Redirect(w, r, dest, http.StatusSeeOther)
 }

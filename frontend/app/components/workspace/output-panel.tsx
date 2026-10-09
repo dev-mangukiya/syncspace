@@ -442,10 +442,10 @@ export const OutputPanel: React.FC<OutputPanelProps> = ({
                     <AlertTriangle size={18} color="#eab308" style={{ flexShrink: 0, marginTop: '2px' }} />
                     <div style={{ flex: 1 }}>
                       <div style={{ fontWeight: 600, color: 'var(--color-text)', fontSize: 'var(--text-sm)' }}>
-                        Email Verification Required to Run Code
+                        Email verification required to run code
                       </div>
                       <p style={{ margin: '4px 0 10px 0', fontSize: 'var(--text-xs)', color: 'var(--color-text-muted)', lineHeight: 1.5 }}>
-                        Sandbox code execution is gated for unverified accounts. Because our test email sender is restricted to developer testing at $0 spend, verification emails cannot reach outside inboxes. You can unlock Run instantly at no cost by connecting your Google account.
+                        Email verification isn't available for this account yet. Sign in with Google to unlock Run instantly.
                       </p>
                       <a
                         id="google-unlock-run-btn"
@@ -466,7 +466,7 @@ export const OutputPanel: React.FC<OutputPanelProps> = ({
                           <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
                           <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
                         </svg>
-                        Continue with Google to unlock Run
+                        Sign in with Google to unlock Run
                       </a>
                     </div>
                   </div>

@@ -7,6 +7,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
+	"github.com/syncspace/ws-server/internal/auth"
 )
 
 func TestSignup_RequiresTerms(t *testing.T) {
@@ -216,5 +219,71 @@ func TestSanitizeOAuthUsername(t *testing.T) {
 		if got != tt.expected {
 			t.Errorf("sanitizeOAuthUsername(%q, %q) = %q, want %q", tt.name, tt.email, got, tt.expected)
 		}
+	}
+}
+
+func TestGoogleLogin_SetsLinkingUserCookieWhenAuthenticated(t *testing.T) {
+	authSvc := auth.NewService("test-jwt-secret-32-bytes-long!!", false)
+	h := NewAuthHandler(nil, authSvc, nil, AuthConfig{
+		GoogleClientID:     "test-client-id",
+		GoogleClientSecret: "test-client-secret",
+	})
+
+	testUID := uuid.New()
+	token, err := authSvc.GenerateAccessToken(testUID, "testuser", "test@example.com")
+	if err != nil {
+		t.Fatalf("failed to generate access token: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/google", nil)
+	req.AddCookie(&http.Cookie{
+		Name:  "syncspace_access",
+		Value: token,
+	})
+	w := httptest.NewRecorder()
+
+	h.GoogleLogin(w, req)
+
+	var linkCookie *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "syncspace_oauth_link_user" {
+			linkCookie = c
+			break
+		}
+	}
+
+	if linkCookie == nil {
+		t.Fatal("expected syncspace_oauth_link_user cookie to be set")
+	}
+	if linkCookie.Value != testUID.String() {
+		t.Fatalf("expected link cookie value %s, got %s", testUID.String(), linkCookie.Value)
+	}
+}
+
+func TestGoogleLogin_ClearsLinkingUserCookieWhenUnauthenticated(t *testing.T) {
+	authSvc := auth.NewService("test-jwt-secret-32-bytes-long!!", false)
+	h := NewAuthHandler(nil, authSvc, nil, AuthConfig{
+		GoogleClientID:     "test-client-id",
+		GoogleClientSecret: "test-client-secret",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/google", nil)
+	w := httptest.NewRecorder()
+
+	h.GoogleLogin(w, req)
+
+	var linkCookie *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "syncspace_oauth_link_user" {
+			linkCookie = c
+			break
+		}
+	}
+
+	if linkCookie == nil {
+		t.Fatal("expected syncspace_oauth_link_user cookie to be set")
+	}
+	if linkCookie.MaxAge != -1 || linkCookie.Value != "" {
+		t.Fatalf("expected link cookie to be cleared (MaxAge -1, Value empty), got MaxAge=%d, Value=%s", linkCookie.MaxAge, linkCookie.Value)
 	}
 }
