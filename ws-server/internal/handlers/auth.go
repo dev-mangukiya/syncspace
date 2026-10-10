@@ -821,10 +821,21 @@ func (h *AuthHandler) GoogleCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := h.db.LinkOAuth(sessionUser.ID, "google", googleProfile.Sub); err != nil {
-			log.Printf("[OAUTH] LinkOAuth failed for session user %s: %v", sessionUser.ID, err)
-			http.Redirect(w, r, dest+"?error="+url.QueryEscape("Failed to link Google account"), http.StatusSeeOther)
-			return
+		if !sessionUser.EmailVerified {
+			log.Printf("[OAUTH] Authenticated linking of unverified account %s (%s). Invalidating original password hash to close pre-hijacking backdoor.",
+				sessionUser.ID, sessionUser.Email)
+			if err := h.db.LinkOAuthInvalidatingPassword(sessionUser.ID, "google", googleProfile.Sub); err != nil {
+				log.Printf("[OAUTH] LinkOAuthInvalidatingPassword failed for session user %s: %v", sessionUser.ID, err)
+				http.Redirect(w, r, dest+"?error="+url.QueryEscape("Failed to link Google account"), http.StatusSeeOther)
+				return
+			}
+			sessionUser.PasswordHash = ""
+		} else {
+			if err := h.db.LinkOAuth(sessionUser.ID, "google", googleProfile.Sub); err != nil {
+				log.Printf("[OAUTH] LinkOAuth failed for session user %s: %v", sessionUser.ID, err)
+				http.Redirect(w, r, dest+"?error="+url.QueryEscape("Failed to link Google account"), http.StatusSeeOther)
+				return
+			}
 		}
 
 		user = sessionUser

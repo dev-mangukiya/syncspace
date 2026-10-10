@@ -1,31 +1,45 @@
 import { chromium } from 'playwright';
 
+const PROD_URL = 'https://syncspace-bay.vercel.app';
+
 async function main() {
+  console.log('Logging in to live site via API as unverified user...');
+  const loginRes = await fetch(`${PROD_URL}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'unverified_1791374084033@syncspace-test.internal',
+      password: 'StrongPassword123!',
+    }),
+  });
+
+  if (!loginRes.ok) {
+    throw new Error(`Login failed with status ${loginRes.status}`);
+  }
+
+  const rawSetCookies = loginRes.headers.getSetCookie ? loginRes.headers.getSetCookie() : [];
+  const parsedCookies = rawSetCookies.map(cookieStr => {
+    const parts = cookieStr.split(';').map(p => p.trim());
+    const [name, ...valParts] = parts[0].split('=');
+    const value = valParts.join('=');
+    return {
+      name,
+      value,
+      domain: 'syncspace-bay.vercel.app',
+      path: name === 'syncspace_refresh' ? '/api/auth' : '/',
+      httpOnly: name.includes('access') || name.includes('refresh'),
+      secure: true,
+    };
+  });
+
   const browser = await chromium.launch({ channel: 'chrome', headless: true });
   const context = await browser.newContext();
+  await context.addCookies(parsedCookies);
+
   const page = await context.newPage();
-  
-  // Set auth cookies directly to log in as unverified_084033
-  await context.addCookies([
-    {
-      name: 'syncspace_access',
-      value: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiMDAzZTkwZjQtMGVhYS00ZmNjLWEwODktZDQ4ZmUzYjA5MjBhIiwidXNlcm5hbWUiOiJ1bnZlcmlmaWVkXzA4NDAzMyIsImVtYWlsIjoidW52ZXJpZmllZF8xNzkxMzc0MDg0MDMzQHN5bmNzcGFjZS10ZXN0LmludGVybmFsIiwiaXNzIjoic3luY3NwYWNlIiwic3ViIjoiYWNjZXNzIiwiZXhwIjoxNzkxNDQ5Njc1LCJpYXQiOjE3OTE0NDg3NzV9.WreByU-jK2wnAd9SPcs1xBM-THbAzYJakA90SpI2W2Q',
-      domain: 'syncspace-bay.vercel.app',
-      path: '/',
-      httpOnly: true,
-      secure: true,
-    },
-    {
-      name: 'syncspace_csrf',
-      value: 'ee5cd44e63c7032ae55db976c530ab58',
-      domain: 'syncspace-bay.vercel.app',
-      path: '/',
-      secure: false,
-    }
-  ]);
 
   console.log('1. Navigating to dashboard as unverified user...');
-  await page.goto('https://syncspace-bay.vercel.app/dashboard', { waitUntil: 'networkidle' });
+  await page.goto(`${PROD_URL}/dashboard`, { waitUntil: 'networkidle' });
   await page.waitForTimeout(2000);
   await page.screenshot({ path: '/Users/devmangukiya/.gemini/antigravity-ide/brain/e6dc6e37-67ed-4370-92e0-401d95603a45/unverified_dashboard.png', fullPage: true });
 
@@ -39,7 +53,7 @@ async function main() {
   }
 
   console.log('\n2. Navigating to workspace as unverified user...');
-  await page.goto('https://syncspace-bay.vercel.app/w/3311cdf85d4b471ea6b093f4bfbf767a', { waitUntil: 'networkidle' });
+  await page.goto(`${PROD_URL}/w/3311cdf85d4b471ea6b093f4bfbf767a`, { waitUntil: 'networkidle' });
   await page.waitForTimeout(2000);
 
   // Click Run button
